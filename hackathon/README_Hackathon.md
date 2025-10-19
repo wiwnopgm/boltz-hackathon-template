@@ -59,7 +59,7 @@ To participate in the hackathon:
   - `--input-jsonl` provides information about task type, input molecules, and ground truth for evaluation
   - `--msa-dir` contains the pre-computed MSA
   - `--submission-dir` is the output directory for the predicted structures
-  - `--intermediate-dir` is directory for temporary files
+  - `--intermediate-dir` is directory for temporary files (input YAMLs, Boltz outputs, etc.)
   - `--result-folder` is the output directory for the evaluation results (metrics)
 
    **_NOTE:_** If this is your first time using `boltz`, some files (model weights, CCD library) will get downloaded to your machine first. This can take a while and should *not* be interrupted to not corrupt the files. So take the chance, grab a coffee, and talk to some other participants!
@@ -69,7 +69,7 @@ Review the metrics to assess your improvements.
 
 4. **Iterate**: Refine your approach based on evaluation results and repeat!
 
-5. **Submit**: Before the deadline, push your final code to your forked repository and fill out the [submission form](TBD).
+5. **Submit**: Before the deadline, push your final code to your forked repository and fill out the [submission form](https://forms.office.com/Pages/ResponsePage.aspx?id=Wft223ejIEG8VFnerX05yXDK4yzHF_lJvVLbJHaHqwFUN0NZMk4xTFBSUlNWTlkzNUhDS1pBUlVHViQlQCN0PWcu).
 
 ## Entrypoints for Participants 💻
 
@@ -99,7 +99,7 @@ This function gets as input:
 
 - `datapoint_id: str`: The ID of the current datapoint
 - `proteins: list[Protein]`: A list of `Protein` objects to be processed (defined in `hackathon_api.Protein`)
-- `input_dict: dict`: A pre-filled dictionary containing the YAML definition for that data point
+- `input_dict: dict`: A pre-filled dictionary with minimal input data for that data point
 - `msa_dir: Path`: The directory with the precomputed MSA files. MSA files are always provided.
 
 For example input information see `hackathon_data/datasets/abag_public/abag_public.jsonl`. This information will be automatically converted to the above-specified objects.
@@ -112,14 +112,28 @@ Each protein has attributes
 
 Each data point contains three proteins with IDs: `"H"` (heavy chain segment), `"L"` (light chain segment), and `"A"` (antigen).
 
+The `input_dict` has the `sequences` field already filled with `protein` or `ligand` entries for each molecule in the datapoint. 
+A `protein` entry already has the `id`, `sequence`, and `msa` fields filled. 
+A `ligand` entry has the `id` and `smiles` fields filled. 
+Inside this function you can copy and modify `input_dict` as needed to add or change any other fields supported by the Boltz input YAML format (e.g., constraints, hyperparameters, etc.).
+
 The function should return a **list of tuples**, where each tuple contains:
 
 - A modified `input_dict` with any changes made during preparation, which will be reflected in the Boltz input YAML.
 - A list of CLI arguments that should be passed to Boltz for this configuration.
 
-By returning multiple tuples, you can run Boltz with different configurations for the same datapoint (e.g., different sampling strategies, different constraints, different hyperparameters). Each configuration will be run separately with its own YAML file and CLI argument combination.
+By returning multiple tuples, you can run Boltz with different configurations for the same datapoint (e.g., different sampling strategies, different constraints, different hyperparameters). 
+Each configuration will be run separately with its own YAML file and CLI argument combination.
 
-Note that we have already precomputed MSA for all proteins and it will be input alongside the protein sequences. Thus, you can not change the MSA calculation. However, you can post-process the input MSA within the `prepare_protein_complex` function before it is passed to the Boltz model, e.g. save a sub-sampled MSA to a *new* CSV file and ajust the MSA path of the protein in `input_dict` accordingly. You can find example MSA in the provided data.
+**_NOTE_**: Your CLI arguments will be appended to a list of default arguments: 
+
+- `--devices 1`
+- `--cache` (use `BOLTZ_CACHE` environment variable to adapt cache location)
+- `--output-dir` (based on `--intermediate-dir` argument of `predict_hackathon.py`)
+- `--no-kernels` (to disable custom CUDA kernels for compatibility)
+- `--output-format pdb` (to always output PDB files)
+
+We have already precomputed MSAs for all proteins and they will be input alongside the protein sequences. Thus, you can not change the MSA calculation. However, you can post-process the input MSA within the `prepare_protein_complex` function before it is passed to the Boltz model, e.g. save a sub-sampled MSA to a *new* CSV file and ajust the MSA path of the protein in `input_dict` accordingly. You can find example MSA in the provided data.
 
 #### Step 2: Running Boltz
 
@@ -152,7 +166,8 @@ For the allosteric-orthosteric ligand challenge, there are similar functions as 
 `def prepare_protein_ligand(datapoint_id: str, protein: Protein, ligands: list[SmallMolecule], input_dict: dict, msa_dir: Optional[Path] = None) -> list[tuple[dict, list[str]]]:`
 
 Here, `protein` is a single protein object and `ligands` is a list containing a single small molecule object (defined in `hackathon_api.SmallMolecule`). 
-We initially thought of allowing multiple ligands, but for this challenge we will only have a single ligand per data point.
+
+**_NOTE_**: We initially thought of allowing multiple ligands, but for this challenge we will only have a single ligand per data point.
 
 For example input information see `hackathon_data/datasets/asos_public/asos_public.jsonl`.
 
@@ -183,8 +198,13 @@ When evaluating your contributions your code will run in an environment with the
 - 32 CPU cores
 - 300 GB RAM
 
-On this machine the full end-to-end prediction for a single datapoint, including pre-processing, Boltz prediction, post-processing, should complete within 15 minutes on average. 
-As a reference, one typical antibody-antigen complex with 5 diffusion samples and default settings takes around 80-90 seconds end-to-end on that kind of hardware.
+Evaluation on either the full antibody-antigen complex test set or the full allosteric-orthosteric ligand test set must complete within **24 hours**.
+
+As a reference, predicting the full internal test set for the antibody-antigen complex challenge (50 data points) with Boltz-2 settings as in this template repo takes around 80 minutes end-to-end on that kind of hardware. 
+That means you can roughly spend 18 times more compute budget than Boltz-2 default settings if you want to process the full test set within 24 hours, but we advise to leave some buffer.
+
+Predicting the full internal test set for the allosteric-orthosteric ligand challenge (44 data points) with Boltz-2 settings as in this template repo takes around 60 minutes end-to-end on our hardware.
+That means you can roughly spend 24 times more compute budget than Boltz-2 default settings if you want to process the full test set within 24 hours, but we advise to leave some buffer.
 
 To protect our proprietary data and ensure a fair competition, the evaluation environment will have **no internet access**.
 
@@ -292,7 +312,7 @@ If you make deeper changes to the provided code, make sure your final prediction
 ## Handing In Your Final Submission 🎉
 
 Before the deadline on **21st October 2025, 17:30 CEST / 11:30 EDT**, please submit your final code by pushing to your forked repository on GitHub. 
-Then fill out the [submission form](TBD) and enter
+Then fill out the [submission form](https://forms.office.com/Pages/ResponsePage.aspx?id=Wft223ejIEG8VFnerX05yXDK4yzHF_lJvVLbJHaHqwFUN0NZMk4xTFBSUlNWTlkzNUhDS1pBUlVHViQlQCN0PWcu) and enter
 
 - your group name
 - the link to your repository
@@ -320,4 +340,4 @@ If you are joining virtually, please reach out on Slack in the `#m-boltz-hackath
 
 1. Nittinger, Eva, et al. "Co-folding, the future of docking – prediction of allosteric and orthosteric ligands." Artificial Intelligence in the Life Sciences, vol. 8, 2025, p. 100136. Elsevier,
 
-Good luck, have fun! 🚀
+**Good luck, have fun! 🚀**
