@@ -261,12 +261,20 @@ class PredictionDataset(torch.utils.data.Dataset):
         # Inference specific options
         options = record.inference_options
         if options is None:
+<<<<<<< HEAD
             pocket_constraints, contact_constraints, negative_pocket_constraints = None, None, None
         else:
             pocket_constraints, contact_constraints, negative_pocket_constraints = (
                 options.pocket_constraints,
                 options.contact_constraints,
                 options.negative_pocket_constraints,
+=======
+            pocket_constraints, contact_constraints = None, None
+        else:
+            pocket_constraints, contact_constraints = (
+                options.pocket_constraints,
+                options.contact_constraints,
+>>>>>>> b19920cac8e9eda9ef048c96219ebf315a19491c
             )
 
         # Get random seed
@@ -288,7 +296,10 @@ class PredictionDataset(torch.utils.data.Dataset):
                 compute_frames=True,
                 inference_pocket_constraints=pocket_constraints,
                 inference_contact_constraints=contact_constraints,
+<<<<<<< HEAD
                 inference_negative_pocket_constraints=negative_pocket_constraints,
+=======
+>>>>>>> b19920cac8e9eda9ef048c96219ebf315a19491c
                 compute_constraint_features=True,
                 override_method=self.override_method,
                 compute_affinity=self.affinity,

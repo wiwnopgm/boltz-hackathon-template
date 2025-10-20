@@ -2157,6 +2157,7 @@ def process_contact_feature_constraints(
     }
 
 
+<<<<<<< HEAD
 def process_repulsion_contact_feature_constraints(
     data: Tokenized,
     inference_negative_pocket_constraints: list[tuple[int, list[tuple[int, int]], float]],
@@ -2223,6 +2224,8 @@ def process_repulsion_contact_feature_constraints(
     }
 
 
+=======
+>>>>>>> b19920cac8e9eda9ef048c96219ebf315a19491c
 class Boltz2Featurizer:
     """Boltz2 featurizer."""
 
@@ -2266,9 +2269,12 @@ class Boltz2Featurizer:
         inference_contact_constraints: Optional[
             list[tuple[tuple[int, int], tuple[int, int], float]]
         ] = None,
+<<<<<<< HEAD
         inference_negative_pocket_constraints: Optional[
             list[tuple[int, list[tuple[int, int]], float]]
         ] = None,
+=======
+>>>>>>> b19920cac8e9eda9ef048c96219ebf315a19491c
         compute_affinity: bool = False,
     ) -> dict[str, Tensor]:
         """Compute features.
@@ -2399,7 +2405,10 @@ class Boltz2Featurizer:
         residue_constraint_features = {}
         chain_constraint_features = {}
         contact_constraint_features = {}
+<<<<<<< HEAD
         repulsion_contact_constraint_features = {}
+=======
+>>>>>>> b19920cac8e9eda9ef048c96219ebf315a19491c
         if compute_constraint_features:
             residue_constraint_features = process_residue_constraint_features(data)
             chain_constraint_features = process_chain_feature_constraints(data)
@@ -2408,10 +2417,13 @@ class Boltz2Featurizer:
                 inference_pocket_constraints=inference_pocket_constraints if inference_pocket_constraints else [],
                 inference_contact_constraints=inference_contact_constraints if inference_contact_constraints else [],
             )
+<<<<<<< HEAD
             repulsion_contact_constraint_features = process_repulsion_contact_feature_constraints(
                 data=data,
                 inference_negative_pocket_constraints=inference_negative_pocket_constraints if inference_negative_pocket_constraints else [],
             )
+=======
+>>>>>>> b19920cac8e9eda9ef048c96219ebf315a19491c
 
         return {
             **token_features,
@@ -2424,6 +2436,9 @@ class Boltz2Featurizer:
             **residue_constraint_features,
             **chain_constraint_features,
             **contact_constraint_features,
+<<<<<<< HEAD
             **repulsion_contact_constraint_features,
+=======
+>>>>>>> b19920cac8e9eda9ef048c96219ebf315a19491c
             **ligand_to_mw,
         }
