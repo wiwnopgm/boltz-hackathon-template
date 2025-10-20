@@ -1,7 +1,9 @@
-from utils import getRootPath
+import os
 import numpy as np
 import pickle as pkl
-root_path = getRootPath() +'/contrib'
+
+# Get the directory where this config.py file is located
+root_path = os.path.dirname(os.path.abspath(__file__))
 
 dataset = 'LigBind'
 

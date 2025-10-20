@@ -9,7 +9,8 @@ __pycache__/
 /output
 hackathon/contrib/example/out
 # checkpoints
-hackathon/contrib/checkpoints/
+checkpoints/
+binding_output/
 
 # Distribution / packaging
 .Python

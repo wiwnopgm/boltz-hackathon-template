@@ -1,4 +1,6 @@
 # predict_hackathon.py
+import yaml
+import sys
 import argparse
 import json
 import os
@@ -8,7 +10,14 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any, List, Optional
 
-import yaml
+try:
+    from hackathon.contrib import predict_binding_sites
+except ImportError:
+    # Fallback for when running as script
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).parent / 'contrib'))
+    from simple_binding_predictor import predict_binding_sites
 from hackathon_api import Datapoint, Protein, SmallMolecule
 
 # ---------------------------------------------------------------------------
@@ -61,6 +70,22 @@ def prepare_protein_ligand(datapoint_id: str, protein: Protein, ligands: list[Sm
     Returns:
         List of tuples of (final input dict that will get exported as YAML, list of CLI args). Each tuple represents a separate configuration to run.
     """
+
+    # Extract protein sequence and ligand SMILES
+    protein_sequence = protein.sequence
+    ligand_smiles = ligands[0].smiles if ligands else ""
+    
+    # Run binding site prediction
+    binding_results = predict_binding_sites(
+        protein_sequence=protein_sequence,
+        smiles=ligand_smiles,
+        output_dir=f"binding_output/{datapoint_id}/"
+    )
+    
+    print(f"Binding site prediction completed for {datapoint_id}")
+    print(f"Found {len(binding_results['binding_probabilities'])} residues with binding probabilities")
+    print(f"Results saved to: {binding_results['result_csv_path']}")
+
     # Please note:
     # `protein` is a single-chain target protein sequence with id A
     # `ligands` contains a single small molecule ligand object with unknown binding sites

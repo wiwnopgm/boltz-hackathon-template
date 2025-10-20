@@ -7,4 +7,4 @@ python hackathon/predict_hackathon.py \
 
 
 
-python predict_binding_sites.py -op example/out/ -if example/protein.fa -ip example/pdb/ -il example/smiles.txt
+python predict_binding_sites.py -op example/out/ -if example/protein.fa -il example/smiles.txt
