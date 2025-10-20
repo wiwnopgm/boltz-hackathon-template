@@ -21,6 +21,62 @@ except ImportError:
 from hackathon_api import Datapoint, Protein, SmallMolecule
 
 # ---------------------------------------------------------------------------
+# ---- Helper functions for binding site analysis --------------------------
+# ---------------------------------------------------------------------------
+
+def get_top_binding_sites(binding_probs, top_n, threshold=0.5):
+    """
+    Extract the top N binding site positions based on binding probabilities.
+    
+    Args:
+        binding_probs: List of binding probabilities for each residue
+        top_n: Number of top predictions to return
+        threshold: Minimum binding probability threshold
+        
+    Returns:
+        List of residue indices (1-based) with highest binding probabilities
+    """
+    import numpy as np
+    
+    # Convert to numpy array for easier manipulation
+    probs = np.array(binding_probs)
+    
+    # Filter by threshold
+    valid_indices = np.where(probs >= threshold)[0]
+    
+    if len(valid_indices) == 0:
+        # If no residues meet threshold, get top N regardless
+        top_indices = np.argsort(probs)[-top_n:][::-1]
+    else:
+        # Get top N from valid indices
+        valid_probs = probs[valid_indices]
+        top_valid_indices = np.argsort(valid_probs)[-min(top_n, len(valid_indices)):][::-1]
+        top_indices = valid_indices[top_valid_indices]
+    
+    # Convert to 1-based indexing (residue numbers start from 1)
+    return (top_indices + 1).tolist()
+
+def create_pocket_constraints(residue_indices, protein_chain_id, ligand_id="B"):
+    """
+    Create pocket constraints for the input dictionary.
+    
+    Args:
+        residue_indices: List of residue indices (1-based)
+        protein_chain_id: Protein chain identifier (e.g., 'A')
+        ligand_id: Ligand identifier (default: 'B')
+        
+    Returns:
+        Dictionary with pocket constraint configuration
+    """
+    # Create contacts list with protein chain and residue index
+    contacts = [[protein_chain_id, idx] for idx in residue_indices]
+    
+    return {
+        "binder": ligand_id,
+        "contacts": contacts
+    }
+
+# ---------------------------------------------------------------------------
 # ---- Participants should modify these four functions ----------------------
 # ---------------------------------------------------------------------------
 
@@ -85,21 +141,33 @@ def prepare_protein_ligand(datapoint_id: str, protein: Protein, ligands: list[Sm
     print(f"Binding site prediction completed for {datapoint_id}")
     print(f"Found {len(binding_results['binding_probabilities'])} residues with binding probabilities")
     print(f"Results saved to: {binding_results['result_csv_path']}")
+    
+    # Extract top N binding site predictions and create pocket constraints
+    # You can customize these parameters:
+    top_n_predictions = 3 # Number of top predictions to use
+    binding_threshold = 0.8  # Minimum binding probability threshold
+    
+    # Get top binding site positions
+    binding_probs = binding_results['binding_probabilities']
+    top_indices = get_top_binding_sites(binding_probs, top_n_predictions, binding_threshold)
+    
+    print(f"Selected {len(top_indices)} binding site positions: {top_indices}")
+    
+    # Create pocket constraints for the input dictionary
+    pocket_constraints = create_pocket_constraints(top_indices, protein.id, ligands[0].id if ligands else "B")
+    
+    # Add pocket constraints to input_dict
+    if "constraints" not in input_dict:
+        input_dict["constraints"] = []
+    
+    input_dict["constraints"].append({
+        "pocket": pocket_constraints
+    })
 
     # Please note:
     # `protein` is a single-chain target protein sequence with id A
     # `ligands` contains a single small molecule ligand object with unknown binding sites
-    # you can modify input_dict to change the input yaml file going into the prediction, e.g.
-    # ```
-    # input_dict["constraints"] = [{
-    #   "contact": {
-    #       "token1" : [CHAIN_ID, RES_IDX/ATOM_NAME], 
-    #       "token1" : [CHAIN_ID, RES_IDX/ATOM_NAME]
-    #   }
-    # }]
-    # ```
-    #
-    # will add contact constraints to the input_dict
+    # The binding site prediction results have been used to add pocket constraints to input_dict
 
     # Example: predict 5 structures
     cli_args = ["--diffusion_samples", "5"]
@@ -256,8 +324,36 @@ def _run_boltz_and_collect(datapoint) -> None:
     for config_idx, (input_dict, cli_args) in enumerate(configs):
         # Write input YAML with config index suffix
         yaml_path = input_dir / f"{datapoint.datapoint_id}_config_{config_idx}.yaml"
+        
+        # Write YAML with custom formatting for contacts
         with open(yaml_path, "w") as f:
-            yaml.safe_dump(input_dict, f, sort_keys=False)
+            f.write("version: 1\n")
+            f.write("sequences:\n")
+            
+            # Write protein sequence
+            f.write("- protein:\n")
+            f.write(f"    id: {input_dict['sequences'][0]['protein']['id']}\n")
+            f.write(f"    sequence: {input_dict['sequences'][0]['protein']['sequence']}\n")
+            f.write(f"    msa: {input_dict['sequences'][0]['protein']['msa']}\n")
+            
+            # Write ligand sequence
+            f.write("- ligand:\n")
+            f.write(f"    id: {input_dict['sequences'][1]['ligand']['id']}\n")
+            f.write(f"    smiles: {input_dict['sequences'][1]['ligand']['smiles']}\n")
+            
+            # Write constraints
+            f.write("constraints:\n")
+            for constraint in input_dict['constraints']:
+                if 'pocket' in constraint:
+                    f.write("- pocket:\n")
+                    f.write(f"    binder: {constraint['pocket']['binder']}\n")
+                    f.write("    contacts: [")
+                    contacts = constraint['pocket']['contacts']
+                    for i, contact in enumerate(contacts):
+                        if i > 0:
+                            f.write(", ")
+                        f.write(f"[ {contact[0]}, {contact[1]} ]")
+                    f.write(" ]\n")
 
         # Run boltz
         cache = os.environ.get("BOLTZ_CACHE", str(Path.home() / ".boltz"))
