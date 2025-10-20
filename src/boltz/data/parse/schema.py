@@ -1200,7 +1200,6 @@ def parse_boltz_schema(  # noqa: C901, PLR0915, PLR0912
 
                 if affinity:
                     affinity_mw = AllChem.Descriptors.MolWt(ref_mol)
-<<<<<<< HEAD
 
                     # Add error and warning messaging when computing affinity with ligands too large
                     if ref_mol.GetNumAtoms() > 128:
@@ -1210,8 +1209,6 @@ def parse_boltz_schema(  # noqa: C901, PLR0915, PLR0912
                     elif ref_mol.GetNumAtoms() > 56:
                         print("WARNING: the ligand used for affinity calculation is larger than 56 heavy-atoms, which "
                               "was the maximum during training, therefore the affinity output might be inaccurate.")
-=======
->>>>>>> b19920cac8e9eda9ef048c96219ebf315a19491c
 
                 # Parse residue
                 residue = parse_ccd_residue(
@@ -1264,7 +1261,6 @@ def parse_boltz_schema(  # noqa: C901, PLR0915, PLR0912
                 raise ValueError(msg)
 
             mol_no_h = AllChem.RemoveHs(mol, sanitize=False)
-<<<<<<< HEAD
 
             if affinity:
                 # Add error and warning messaging when computing affinity with ligands too large
@@ -1275,8 +1271,6 @@ def parse_boltz_schema(  # noqa: C901, PLR0915, PLR0912
                     print("WARNING: the ligand used for affinity calculation is larger than 56 heavy-atoms, "
                           "which was the maximum during training, therefore the affinity output might be inaccurate.")
 
-=======
->>>>>>> b19920cac8e9eda9ef048c96219ebf315a19491c
             affinity_mw = AllChem.Descriptors.MolWt(mol_no_h) if affinity else None
             extra_mols[f"LIG{ligand_id}"] = mol_no_h
             residue = parse_ccd_residue(
@@ -1518,10 +1512,7 @@ def parse_boltz_schema(  # noqa: C901, PLR0915, PLR0912
     connections = []
     pocket_constraints = []
     contact_constraints = []
-<<<<<<< HEAD
     negative_pocket_constraints = []
-=======
->>>>>>> b19920cac8e9eda9ef048c96219ebf315a19491c
     constraints = schema.get("constraints", [])
     for constraint in constraints:
         if "bond" in constraint:
@@ -1569,7 +1560,6 @@ def parse_boltz_schema(  # noqa: C901, PLR0915, PLR0912
 
             force = constraint["pocket"].get("force", False)
             pocket_constraints.append((binder, contacts, max_distance, force))
-<<<<<<< HEAD
         elif "negative_pocket" in constraint:
             if (
                 "binder" not in constraint["negative_pocket"]
@@ -1602,8 +1592,6 @@ def parse_boltz_schema(  # noqa: C901, PLR0915, PLR0912
 
             force = constraint["negative_pocket"].get("force", False)
             negative_pocket_constraints.append((binder, contacts, min_distance, force))
-=======
->>>>>>> b19920cac8e9eda9ef048c96219ebf315a19491c
         elif "contact" in constraint:
             if (
                 "token1" not in constraint["contact"]
@@ -1849,13 +1837,9 @@ def parse_boltz_schema(  # noqa: C901, PLR0915, PLR0912
         chain_infos.append(chain_info)
 
     options = InferenceOptions(
-<<<<<<< HEAD
         pocket_constraints=pocket_constraints,
         contact_constraints=contact_constraints,
         negative_pocket_constraints=negative_pocket_constraints,
-=======
-        pocket_constraints=pocket_constraints, contact_constraints=contact_constraints
->>>>>>> b19920cac8e9eda9ef048c96219ebf315a19491c
     )
     record = Record(
         id=name,
