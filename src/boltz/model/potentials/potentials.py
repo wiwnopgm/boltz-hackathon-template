@@ -668,11 +668,24 @@ class ContactPotentital(FlatBottomPotential, DistancePotential):
         )
         
 class RepulsionContactPotential(FlatBottomPotential, DistancePotential):
+    """Repulsion contact potential that creates true repulsion (opposite of ContactPotential).
+    
+    ContactPotential (attraction):
+        - upper_bounds only: penalty when distance > threshold
+        - dEnergy > 0 → pushes to decrease distance (attract)
+    
+    RepulsionContactPotential (repulsion):
+        - lower_bounds only: penalty when distance < threshold  
+        - dEnergy > 0 → pushes to increase distance (repel)
+        - Negates gradient to flip direction from FlatBottomPotential's default
+    """
+    
     def compute_args(self, feats, parameters):
-        index = feats["contact_pair_index"][0]
-        union_index = feats["contact_union_index"][0]
-        negation_mask = feats["contact_negation_mask"][0]
-        lower_bounds = feats["contact_thresholds"][0].clone()
+        index = feats["repulsion_contact_pair_index"][0]
+        union_index = feats["repulsion_contact_union_index"][0]
+        negation_mask = feats["repulsion_contact_negation_mask"][0]
+        # Use lower_bounds: penalty when too close
+        lower_bounds = feats["repulsion_contact_thresholds"][0].clone()
         upper_bounds = None
         k = torch.ones_like(lower_bounds)
         return (
@@ -682,6 +695,31 @@ class RepulsionContactPotential(FlatBottomPotential, DistancePotential):
             None,
             (negation_mask, union_index),
         )
+    
+    def compute_function(
+        self,
+        value,
+        k,
+        lower_bounds,
+        upper_bounds,
+        negation_mask=None,
+        compute_derivative=False,
+    ):
+        # Call parent to get standard flat-bottom potential
+        result = super().compute_function(
+            value, k, lower_bounds, upper_bounds, negation_mask, compute_derivative
+        )
+        
+        # Negate gradient only to flip repulsion direction
+        # Energy stays positive (penalty) but gradient is inverted
+        # When distance < threshold:
+        #   - energy = k * (threshold - distance) > 0 (penalty)
+        #   - dEnergy = +k (instead of -k) → pushes to INCREASE distance
+        if compute_derivative:
+            energy, dEnergy = result
+            return energy, -dEnergy  # Negate gradient only
+        else:
+            return result  # Keep energy positive for penalty
 
 def get_potentials(steering_args, boltz2=False):
     potentials = []
@@ -796,6 +834,22 @@ def get_potentials(steering_args, boltz2=False):
                         if steering_args["contact_guidance_update"]
                         else 0.0,
                         "resampling_weight": 1.0,
+                    }
+                ),
+                RepulsionContactPotential(
+                    parameters={
+                        "guidance_interval": 4,
+                        "guidance_weight": (
+                            PiecewiseStepFunction(
+                                thresholds=[0.25, 0.75], values=[0.0, 0.5, 1.0]
+                            )
+                            if steering_args["contact_guidance_update"]
+                            else 0.0
+                        ),
+                        "resampling_weight": 1.0,
+                        "union_lambda": ExponentialInterpolation(
+                            start=8.0, end=0.0, alpha=-2.0
+                        ),
                     }
                 ),
             ]

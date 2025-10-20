@@ -158,7 +158,7 @@ ap.add_argument("--result-folder", type=Path, required=False, default=None,
 
 args = ap.parse_args()
 
-def _prefill_input_dict(datapoint_id: str, proteins: Iterable[Protein], ligands: Optional[list[SmallMolecule]] = None, msa_dir: Optional[Path] = None) -> dict:
+def _prefill_input_dict(datapoint_id: str, proteins: Iterable[Protein], ligands: Optional[list[SmallMolecule]] = None, msa_dir: Optional[Path] = None, constraints: Optional[list] = None) -> dict:
     """
     Prepare input dict for Boltz YAML.
     """
@@ -199,6 +199,11 @@ def _prefill_input_dict(datapoint_id: str, proteins: Iterable[Protein], ligands:
         "version": 1,
         "sequences": seqs,
     }
+    
+    # Add constraints if provided
+    if constraints:
+        doc["constraints"] = constraints
+    
     return doc
 
 def _run_boltz_and_collect(datapoint) -> None:
@@ -211,7 +216,7 @@ def _run_boltz_and_collect(datapoint) -> None:
     subdir.mkdir(parents=True, exist_ok=True)
 
     # Prepare input dict and CLI args
-    base_input_dict = _prefill_input_dict(datapoint.datapoint_id, datapoint.proteins, datapoint.ligands, args.msa_dir)
+    base_input_dict = _prefill_input_dict(datapoint.datapoint_id, datapoint.proteins, datapoint.ligands, args.msa_dir, datapoint.constraints)
 
     if datapoint.task_type == "protein_complex":
         configs = prepare_protein_complex(datapoint.datapoint_id, datapoint.proteins, base_input_dict, args.msa_dir)
@@ -232,7 +237,20 @@ def _run_boltz_and_collect(datapoint) -> None:
         # Write input YAML with config index suffix
         yaml_path = input_dir / f"{datapoint.datapoint_id}_config_{config_idx}.yaml"
         with open(yaml_path, "w") as f:
-            yaml.safe_dump(input_dict, f, sort_keys=False)
+            # Custom YAML formatting to keep contacts as inline lists
+            class FlowListDumper(yaml.SafeDumper):
+                pass
+            
+            def represent_list(dumper, data):
+                # If this is a constraint contacts list (list of 2-element lists), use flow style
+                if data and isinstance(data, list) and len(data) > 0:
+                    if all(isinstance(item, list) and len(item) == 2 for item in data):
+                        return dumper.represent_sequence('tag:yaml.org,2002:seq', data, flow_style=True)
+                return dumper.represent_sequence('tag:yaml.org,2002:seq', data, flow_style=False)
+            
+            FlowListDumper.add_representer(list, represent_list)
+            
+            yaml.dump(input_dict, f, Dumper=FlowListDumper, sort_keys=False, default_flow_style=False)
 
         # Run boltz
         cache = os.environ.get("BOLTZ_CACHE", str(Path.home() / ".boltz"))
