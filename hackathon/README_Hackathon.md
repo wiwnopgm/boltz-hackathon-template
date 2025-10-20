@@ -73,6 +73,8 @@ Review the metrics to assess your improvements.
 
 ## Entrypoints for Participants 💻
 
+The following workflow is relevant for both challenges. We provide some dedicated explanation only relevant for the Allosteric-orthosteric ligand prediction challenge down below.
+
 ### `hackathon/predict_hackathon.py`
 
 We will evaluate your contributions by calling `hackathon/predict_hackathon.py` (see example above). This script performs the following main steps for each data point (e.g., protein complex) of a dataset (defined in`--input-jsonl`): 
@@ -159,7 +161,7 @@ The function should return a list of **Path objects** pointing to the PDB files 
 The order is important!
 The first path will be your top 1 prediction, and we will evaluate up to 5 predictions for each data point.
 
-#### Allosteric-orthosteric ligand prediction challenge
+### Allosteric-orthosteric ligand prediction challenge
 
 For the allosteric-orthosteric ligand challenge, there are similar functions as for antibody-antigen complex challenge explained above. Here are summarized only parts of code that differ between the two challenges, so please first read the above explanations.
 
@@ -207,6 +209,8 @@ Predicting the full internal test set for the allosteric-orthosteric ligand chal
 That means you can roughly spend 24 times more compute budget than Boltz-2 default settings if you want to process the full test set within 24 hours, but we advise to leave some buffer.
 
 To protect our proprietary data and ensure a fair competition, the evaluation environment will have **no internet access**.
+
+If your workflow creates additional temporary files, please make sure to place them into the `--intermediate-dir` folder.
 
 ## Validation Sets 🧪
 
@@ -292,6 +296,12 @@ Below you see examples of per-structure RMSD plots that Boltz-2 with default set
 ![Example per-structure results for the allosteric-orthosteric ligand challenge](img/orthosteric_rmsd.png)
 
 The winner of this challenge will be the team with the lowest mean RMSD of the top 1 predictions on our *internal* test set.
+
+### Public Leaderboard
+
+You can submit your results on the validation sets to a public leaderboard during the hackathon, here: 
+
+https://huggingface.co/spaces/hugging-science/M-Boltz-Hackathon
 
 ## Submission Format 📦
 
