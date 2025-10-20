@@ -666,7 +666,22 @@ class ContactPotentital(FlatBottomPotential, DistancePotential):
             None,
             (negation_mask, union_index),
         )
-
+        
+class RepulsionContactPotential(FlatBottomPotential, DistancePotential):
+    def compute_args(self, feats, parameters):
+        index = feats["contact_pair_index"][0]
+        union_index = feats["contact_union_index"][0]
+        negation_mask = feats["contact_negation_mask"][0]
+        lower_bounds = feats["contact_thresholds"][0].clone()
+        upper_bounds = None
+        k = torch.ones_like(lower_bounds)
+        return (
+            index,
+            (k, lower_bounds, upper_bounds),
+            None,
+            None,
+            (negation_mask, union_index),
+        )
 
 def get_potentials(steering_args, boltz2=False):
     potentials = []

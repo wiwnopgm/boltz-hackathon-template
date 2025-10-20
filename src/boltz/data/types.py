@@ -527,6 +527,9 @@ class InferenceOptions:
     contact_constraints: Optional[
         list[tuple[tuple[int, int], tuple[int, int], float, bool]]
     ] = None
+    negative_pocket_constraints: Optional[
+        list[tuple[int, list[tuple[int, int]], float, bool]]
+    ] = None
 
 
 @dataclass(frozen=True)
