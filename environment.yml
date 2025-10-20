@@ -9,3 +9,4 @@ dependencies:
   - pip:
     - lxml==5.2.1
     - periodictable==1.7.0
+    - accelerate
