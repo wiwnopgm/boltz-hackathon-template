@@ -140,7 +140,8 @@ def prepare_protein_ligand(datapoint_id: str, protein: Protein, ligands: list[Sm
         binding_results = predict_binding_sites(
             protein_sequence=protein_sequence,
             smiles=ligand_smiles,
-            output_dir=f"binding_output/{datapoint_id}/"
+            output_dir=f"binding_output/{datapoint_id}/",
+            use_boltz=False,
         )
         
         print(f"Binding site prediction completed for {datapoint_id}")
@@ -176,7 +177,7 @@ def prepare_protein_ligand(datapoint_id: str, protein: Protein, ligands: list[Sm
     # `ligands` contains a single small molecule ligand object with unknown binding sites
     # The binding site prediction results have been used to add pocket constraints to input_dict
 
-    cli_args = ["--diffusion_samples", "30", "--sampling_steps", "300", "--use_potentials"]
+    cli_args = ["--diffusion_samples", "10", "--sampling_steps", "300", "--use_potentials"]
     return [(input_dict, cli_args)]
 
 def post_process_protein_complex(datapoint: Datapoint, input_dicts: List[dict[str, Any]], cli_args_list: List[list[str]], prediction_dirs: List[Path]) -> List[Path]:

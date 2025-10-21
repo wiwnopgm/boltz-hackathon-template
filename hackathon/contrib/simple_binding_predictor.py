@@ -9,7 +9,7 @@ from pathlib import Path
 from predict_binding_sites_function import predict_binding_sites_from_text
 
 
-def predict_binding_sites(protein_sequence: str, smiles: str, output_dir: str = "./binding_output/") -> dict:
+def predict_binding_sites(protein_sequence: str, smiles: str, output_dir: str = "./binding_output/", use_boltz: bool = False) -> dict:
     """
     Simple function to predict protein-ligand binding sites.
     
@@ -43,7 +43,8 @@ def predict_binding_sites(protein_sequence: str, smiles: str, output_dir: str = 
         output_dir=output_dir,
         batch_size=1,
         device_ids=[0],
-        cluster=True
+        cluster=True,
+        use_boltz=use_boltz,
     )
     
     return results

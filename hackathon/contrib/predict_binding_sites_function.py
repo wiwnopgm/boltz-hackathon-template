@@ -39,7 +39,8 @@ def predict_binding_sites_from_text(
     batch_size: int = 1,
     device_ids: list = [0],
     cluster: bool = False,
-    input_pdb_path: str = None
+    input_pdb_path: str = None,
+    use_boltz: bool = False,
 ) -> dict:
     """
     Predict protein-ligand binding sites using text inputs instead of file paths.
@@ -98,7 +99,7 @@ def predict_binding_sites_from_text(
             shutil.copy(input_pdb_path, pdb_dir / f"{protein_id}.pdb")
         
         # Generate PDB structure using ESMFold
-        _generate_pdb_structure(fasta_file, pdb_dir, run_device)
+        _generate_pdb_structure(fasta_file, pdb_dir, run_device, use_boltz)
         
         # Extract features
         _extract_dssp_features(pdb_dir, dssp_dir)
@@ -145,45 +146,38 @@ def predict_binding_sites_from_text(
         }
 
 
-def _generate_pdb_structure(fasta_file, pdb_dir, device):
+def _generate_pdb_structure(fasta_file, pdb_dir, device, use_boltz: bool = False):
     """Generate PDB structure using ESMFold."""
     sequences = list(SeqIO.parse(fasta_file, "fasta"))
     
-    # Check if PDB files already exist
-    flag = True
-    for record in sequences:
-        if not os.path.exists(pdb_dir / f"{record.id}.pdb"):
-            flag = False
-            break
-    
-    if flag:
-        print('PDB files already exist, skipping ESMFold prediction.')
-        return
-    
-    # Load ESMFold model
-    fold_path = pretrain_path['esmfold_path']
-    tokenizer = AutoTokenizer.from_pretrained(fold_path)
-    model = EsmForProteinFolding.from_pretrained(fold_path, low_cpu_mem_usage=True)
-    model = model.eval()
-    model.esm = model.esm.half()
-    model = model.to(device)
-    
-    for record in tqdm(sequences, desc='ESMFold running', ncols=80, unit='proteins'):
-        if os.path.exists(pdb_dir / f"{record.id}.pdb"):
-            continue
+
+    if use_boltz:
+        pass
+    else:
+        # Load ESMFold model
+        fold_path = pretrain_path['esmfold_path']
+        tokenizer = AutoTokenizer.from_pretrained(fold_path)
+        model = EsmForProteinFolding.from_pretrained(fold_path, low_cpu_mem_usage=True)
+        model = model.eval()
+        model.esm = model.esm.half()
+        model = model.to(device)
         
-        tokenized_input = tokenizer([str(record.seq)], return_tensors="pt", add_special_tokens=False)['input_ids']
-        tokenized_input = tokenized_input.to(device)
+        for record in tqdm(sequences, desc='ESMFold running', ncols=80, unit='proteins'):
+            if os.path.exists(pdb_dir / f"{record.id}.pdb"):
+                continue
+            
+            tokenized_input = tokenizer([str(record.seq)], return_tensors="pt", add_special_tokens=False)['input_ids']
+            tokenized_input = tokenized_input.to(device)
+            
+            with torch.no_grad():
+                output = model(tokenized_input)
+            
+            pdb = convert_outputs_to_pdb(output)
+            with open(pdb_dir / f"{record.id}.pdb", "w") as f:
+                f.write(''.join(pdb))
         
-        with torch.no_grad():
-            output = model(tokenized_input)
-        
-        pdb = convert_outputs_to_pdb(output)
-        with open(pdb_dir / f"{record.id}.pdb", "w") as f:
-            f.write(''.join(pdb))
-    
-    del model
-    gc.collect()
+        del model
+        gc.collect()
 
 
 def _extract_dssp_features(pdb_dir, dssp_dir):
