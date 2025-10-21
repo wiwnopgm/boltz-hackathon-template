@@ -14,6 +14,15 @@ import yaml
 from hackathon_api import Datapoint, Protein, SmallMolecule
 from Bio.PDB import PDBParser, Superimposer, NeighborSearch
 
+try:
+    from rdkit import Chem
+    from rdkit.Chem import AllChem
+    from rdkit import DataStructs
+    RDKIT_AVAILABLE = True
+except ImportError:
+    RDKIT_AVAILABLE = False
+    print("WARNING: RDKit not available. Ligand similarity checking will be disabled.")
+
 # ---------------------------------------------------------------------------
 # ---- Orthosteric Pocket Identification Functions --------------------------
 # ---------------------------------------------------------------------------
@@ -29,6 +38,12 @@ CONFIDENCE_STD_THRESHOLD = 0.005
 # Orthosteric: ~0.0025, Allosteric: ~0.031
 IPTM_STD_THRESHOLD = 0.01
 LIGAND_IPTM_STD_THRESHOLD = 0.01
+
+# Ligand similarity threshold for allosteric detection
+LIGAND_SIMILARITY_THRESHOLD = 0.80  # 80% Tanimoto similarity
+
+# Cache for reference allosteric ligands
+_REFERENCE_ALLOSTERIC_LIGANDS = None
 
 def _load_structure(path: Path):
     """Load a PDB structure."""
@@ -194,6 +209,138 @@ def identify_orthosteric_pocket(prediction_dir: Path) -> Set[Tuple[str, str, int
     
     return contacts
 
+def load_reference_allosteric_ligands(reference_dataset_path: Optional[Path] = None) -> List[str]:
+    """
+    Load SMILES strings of all allosteric ligands from the reference dataset.
+    
+    Args:
+        reference_dataset_path: Path to the reference JSONL dataset file
+        
+    Returns:
+        List of SMILES strings for allosteric ligands
+    """
+    global _REFERENCE_ALLOSTERIC_LIGANDS
+    
+    # Return cached results if available
+    if _REFERENCE_ALLOSTERIC_LIGANDS is not None:
+        return _REFERENCE_ALLOSTERIC_LIGANDS
+    
+    allosteric_smiles = []
+    
+    # Try to find the reference dataset
+    if reference_dataset_path is None:
+        # Look in common locations
+        possible_paths = [
+            Path("/home/ubuntu/will/boltz-hackathon-template/hackathon_data/datasets/asos_public/asos_public.jsonl"),
+            Path.cwd() / "hackathon_data" / "datasets" / "asos_public" / "asos_public.jsonl",
+        ]
+        for path in possible_paths:
+            if path.exists():
+                reference_dataset_path = path
+                break
+    
+    if reference_dataset_path is None or not reference_dataset_path.exists():
+        print("WARNING: Reference dataset not found for ligand similarity checking")
+        _REFERENCE_ALLOSTERIC_LIGANDS = []
+        return []
+    
+    try:
+        with open(reference_dataset_path) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    data = json.loads(line)
+                    # Check if this datapoint has allosteric ligands
+                    if "ground_truth" in data and "ligand_types" in data["ground_truth"]:
+                        for ligand_type_info in data["ground_truth"]["ligand_types"]:
+                            if ligand_type_info.get("type") == "allosteric":
+                                # Get the corresponding ligand SMILES
+                                if "ligands" in data:
+                                    for ligand in data["ligands"]:
+                                        # Match by ligand ID
+                                        if ligand["id"] == ligand_type_info.get("ligand_id"):
+                                            allosteric_smiles.append(ligand["smiles"])
+                except json.JSONDecodeError:
+                    continue
+    except Exception as e:
+        print(f"WARNING: Error loading reference dataset: {e}")
+        _REFERENCE_ALLOSTERIC_LIGANDS = []
+        return []
+    
+    _REFERENCE_ALLOSTERIC_LIGANDS = allosteric_smiles
+    print(f"Loaded {len(allosteric_smiles)} reference allosteric ligands from dataset")
+    
+    return allosteric_smiles
+
+def compute_tanimoto_similarity(smiles1: str, smiles2: str) -> float:
+    """
+    Compute Tanimoto similarity between two molecules given as SMILES.
+    
+    Args:
+        smiles1: SMILES string of first molecule
+        smiles2: SMILES string of second molecule
+        
+    Returns:
+        Tanimoto similarity score (0.0 to 1.0), or 0.0 if comparison fails
+    """
+    if not RDKIT_AVAILABLE:
+        return 0.0
+    
+    try:
+        mol1 = Chem.MolFromSmiles(smiles1)
+        mol2 = Chem.MolFromSmiles(smiles2)
+        
+        if mol1 is None or mol2 is None:
+            return 0.0
+        
+        # Generate Morgan fingerprints (ECFP4 equivalent)
+        fp1 = AllChem.GetMorganFingerprintAsBitVect(mol1, radius=2, nBits=2048)
+        fp2 = AllChem.GetMorganFingerprintAsBitVect(mol2, radius=2, nBits=2048)
+        
+        # Calculate Tanimoto similarity
+        similarity = DataStructs.TanimotoSimilarity(fp1, fp2)
+        
+        return float(similarity)
+    except Exception as e:
+        print(f"WARNING: Error computing similarity: {e}")
+        return 0.0
+
+def check_ligand_similarity_to_allosteric(query_smiles: str, reference_dataset_path: Optional[Path] = None, threshold: float = LIGAND_SIMILARITY_THRESHOLD) -> Tuple[bool, float, Optional[str]]:
+    """
+    Check if a query ligand is similar to any known allosteric ligands.
+    
+    Args:
+        query_smiles: SMILES string of the query ligand
+        reference_dataset_path: Path to reference dataset (optional)
+        threshold: Similarity threshold (default 0.80)
+        
+    Returns:
+        Tuple of (is_similar, max_similarity, most_similar_smiles)
+    """
+    if not RDKIT_AVAILABLE:
+        return False, 0.0, None
+    
+    # Load reference allosteric ligands
+    allosteric_ligands = load_reference_allosteric_ligands(reference_dataset_path)
+    
+    if not allosteric_ligands:
+        return False, 0.0, None
+    
+    max_similarity = 0.0
+    most_similar = None
+    
+    for ref_smiles in allosteric_ligands:
+        similarity = compute_tanimoto_similarity(query_smiles, ref_smiles)
+        if similarity > max_similarity:
+            max_similarity = similarity
+            most_similar = ref_smiles
+    
+    is_similar = max_similarity >= threshold
+    
+    return is_similar, max_similarity, most_similar
+
 def extract_confidence_metrics(prediction_output_dir: Path, datapoint_id: str) -> Dict[str, List[float]]:
     """
     Extract confidence metrics from Boltz prediction outputs.
@@ -236,42 +383,71 @@ def extract_confidence_metrics(prediction_output_dir: Path, datapoint_id: str) -
     
     return metrics
 
-def is_allosteric_binder(metrics: Dict[str, List[float]]) -> Tuple[bool, Dict[str, float]]:
+def is_allosteric_binder(metrics: Dict[str, List[float]], ligand_smiles: Optional[str] = None, reference_dataset_path: Optional[Path] = None) -> Tuple[bool, Dict[str, Any]]:
     """
-    Determine if binding is allosteric based on variance in confidence metrics.
+    Determine if binding is allosteric based on:
+    1. Variance in confidence metrics
+    2. Ligand similarity to known allosteric binders (if ligand_smiles provided)
     
     Args:
         metrics: Dictionary with lists of confidence scores, ligand iPTM, and protein iPTM
+        ligand_smiles: Optional SMILES string of the query ligand for similarity checking
+        reference_dataset_path: Optional path to reference dataset for ligand similarity
         
     Returns:
-        Tuple of (is_allosteric, variance_stats)
+        Tuple of (is_allosteric, detection_stats)
     """
-    variance_stats = {}
+    detection_stats = {}
     
+    # 1. Variance-based detection
     # Compute standard deviations
     if len(metrics["confidence_scores"]) > 1:
-        variance_stats["confidence_std"] = float(np.std(metrics["confidence_scores"]))
+        detection_stats["confidence_std"] = float(np.std(metrics["confidence_scores"]))
     else:
-        variance_stats["confidence_std"] = 0.0
+        detection_stats["confidence_std"] = 0.0
     
     if len(metrics["ligand_iptm"]) > 1:
-        variance_stats["ligand_iptm_std"] = float(np.std(metrics["ligand_iptm"]))
+        detection_stats["ligand_iptm_std"] = float(np.std(metrics["ligand_iptm"]))
     else:
-        variance_stats["ligand_iptm_std"] = 0.0
+        detection_stats["ligand_iptm_std"] = 0.0
     
     if len(metrics["protein_iptm"]) > 1:
-        variance_stats["protein_iptm_std"] = float(np.std(metrics["protein_iptm"]))
+        detection_stats["protein_iptm_std"] = float(np.std(metrics["protein_iptm"]))
     else:
-        variance_stats["protein_iptm_std"] = 0.0
+        detection_stats["protein_iptm_std"] = 0.0
     
-    # Determine if allosteric based on thresholds
-    is_allosteric = (
-        variance_stats["confidence_std"] > CONFIDENCE_STD_THRESHOLD or
-        variance_stats["ligand_iptm_std"] > LIGAND_IPTM_STD_THRESHOLD or
-        variance_stats["protein_iptm_std"] > IPTM_STD_THRESHOLD
+    # Check if allosteric based on variance thresholds
+    is_allosteric_by_variance = (
+        detection_stats["confidence_std"] > CONFIDENCE_STD_THRESHOLD or
+        detection_stats["ligand_iptm_std"] > LIGAND_IPTM_STD_THRESHOLD or
+        detection_stats["protein_iptm_std"] > IPTM_STD_THRESHOLD
     )
+    detection_stats["allosteric_by_variance"] = is_allosteric_by_variance
     
-    return is_allosteric, variance_stats
+    # 2. Ligand similarity-based detection
+    is_allosteric_by_similarity = False
+    if ligand_smiles and RDKIT_AVAILABLE:
+        is_similar, max_similarity, most_similar_smiles = check_ligand_similarity_to_allosteric(
+            ligand_smiles, reference_dataset_path, LIGAND_SIMILARITY_THRESHOLD
+        )
+        detection_stats["allosteric_by_similarity"] = is_similar
+        detection_stats["max_ligand_similarity"] = max_similarity
+        detection_stats["most_similar_allosteric_ligand"] = most_similar_smiles
+        is_allosteric_by_similarity = is_similar
+    else:
+        detection_stats["allosteric_by_similarity"] = False
+        detection_stats["max_ligand_similarity"] = 0.0
+        detection_stats["most_similar_allosteric_ligand"] = None
+    
+    # Combined decision: allosteric if EITHER variance OR similarity indicates it
+    is_allosteric = is_allosteric_by_variance or is_allosteric_by_similarity
+    detection_stats["detection_method"] = []
+    if is_allosteric_by_variance:
+        detection_stats["detection_method"].append("variance")
+    if is_allosteric_by_similarity:
+        detection_stats["detection_method"].append("similarity")
+    
+    return is_allosteric, detection_stats
 
 # ---------------------------------------------------------------------------
 # ---- Participants should modify these four functions ----------------------
@@ -394,7 +570,7 @@ def post_process_protein_ligand(datapoint: Datapoint, input_dicts: List[dict[str
         prediction_dirs: List of directories containing prediction results (one per config)
         pocket_residues: Optional set of orthosteric pocket residues
         unconstrained_dir: Optional directory containing unconstrained prediction models
-        is_allosteric: If True, filter structures by pocket RMSD > 4A
+        is_allosteric: If True, filter structures by ligand RMSD > 2A and pocket RMSD > 4A
     Returns: 
         Sorted pdb file paths that should be used as your submission.
     """
@@ -406,6 +582,92 @@ def post_process_protein_ligand(datapoint: Datapoint, input_dicts: List[dict[str
     
     # Sort all PDBs
     all_pdbs = sorted(all_pdbs)
+    
+    # For allosteric binders, filter structures based on ligand RMSD relative to unconstrained predictions
+    if is_allosteric and unconstrained_dir and unconstrained_dir.exists() and len(all_pdbs) > 0:
+        print(f"\n{'='*80}")
+        print(f"Filtering ALLOSTERIC structures by ligand RMSD (relative to unconstrained)")
+        print(f"{'='*80}\n")
+        
+        # Load unconstrained structures
+        unconstrained_paths = [unconstrained_dir / f"model_{i}.pdb" for i in range(5)]
+        unconstrained_structs = []
+        
+        for path in unconstrained_paths:
+            if path.exists():
+                try:
+                    unconstrained_structs.append(_load_structure(path))
+                except Exception as e:
+                    print(f"WARNING: Could not load {path}: {e}")
+        
+        if len(unconstrained_structs) > 0:
+            # Extract ligand coordinates from all unconstrained structures
+            unconstrained_ligands = []
+            for struct in unconstrained_structs:
+                lig_coords = _ligand_coords(struct)
+                if lig_coords:
+                    unconstrained_ligands.append(lig_coords)
+            
+            if len(unconstrained_ligands) > 0:
+                # Load predicted structures and calculate ligand RMSD
+                print(f"Ligand RMSD analysis for allosteric predictions (vs {len(unconstrained_ligands)} unconstrained models):")
+                print(f"{'Model':<40} {'Min Lig RMSD (Å)':<18} {'Avg Lig RMSD (Å)':<18} {'Status':<20}")
+                print("-" * 100)
+                
+                filtered_pdbs = []
+                
+                for pdb_path in all_pdbs:
+                    try:
+                        pred_struct = _load_structure(pdb_path)
+                        pred_lig = _ligand_coords(pred_struct)
+                        
+                        if pred_lig:
+                            # Calculate RMSD to all unconstrained ligands
+                            rmsds = []
+                            for unc_lig in unconstrained_ligands:
+                                rmsd = _ligand_rmsd(pred_lig, unc_lig)
+                                if rmsd != float("inf"):
+                                    rmsds.append(rmsd)
+                            
+                            if rmsds:
+                                min_rmsd = min(rmsds)
+                                avg_rmsd = np.mean(rmsds)
+                                
+                                # For allosteric binders, we want ligand RMSD > 2A (different binding site)
+                                if min_rmsd > 2.0:
+                                    status = "PASS (> 2 Å)"
+                                    filtered_pdbs.append(pdb_path)
+                                else:
+                                    status = "FILTERED (≤ 2 Å)"
+                                
+                                print(f"{pdb_path.name:<40} {min_rmsd:>8.2f}             {avg_rmsd:>8.2f}             {status}")
+                            else:
+                                # If can't calculate, keep it
+                                print(f"{pdb_path.name:<40} {'N/A':>8}             {'N/A':>8}             PASS (cannot calc)")
+                                filtered_pdbs.append(pdb_path)
+                        else:
+                            # No ligand found, keep it anyway
+                            print(f"{pdb_path.name:<40} {'N/A':>8}             {'N/A':>8}             PASS (no ligand)")
+                            filtered_pdbs.append(pdb_path)
+                            
+                    except Exception as e:
+                        print(f"WARNING: Could not process {pdb_path}: {e}")
+                        filtered_pdbs.append(pdb_path)  # Keep on error
+                
+                print("-" * 100)
+                print(f"Filtered structures (ligand RMSD > 2 Å from unconstrained): {len(filtered_pdbs)}/{len(all_pdbs)}")
+                
+                # If all structures filtered out, use unfiltered set
+                if len(filtered_pdbs) == 0:
+                    print("WARNING: All structures filtered out by ligand RMSD. Using unfiltered set.")
+                else:
+                    print(f"Using {len(filtered_pdbs)} structures that pass ligand RMSD > 2 Å filter")
+                    all_pdbs = sorted(filtered_pdbs)
+                print()
+            else:
+                print("WARNING: No ligands found in unconstrained structures. Skipping ligand RMSD filter.")
+        else:
+            print("WARNING: Could not load unconstrained structures. Skipping ligand RMSD filter.")
     
     # For allosteric binders, filter structures based on pocket RMSD
     if is_allosteric and pocket_residues and len(all_pdbs) > 0:
@@ -713,32 +975,56 @@ def _run_boltz_and_collect(datapoint) -> None:
         pocket_residues = identify_orthosteric_pocket(temp_pocket_dir)
         
         # Extract confidence metrics and determine if allosteric
-        print(f"\nAnalyzing confidence variance to detect allosteric binding...")
+        print(f"\nAnalyzing confidence variance and ligand similarity to detect allosteric binding...")
         metrics = extract_confidence_metrics(unconstrained_pred_dir, f"{datapoint.datapoint_id}_unconstrained")
         
+        # Get ligand SMILES for similarity checking
+        ligand_smiles = datapoint.ligands[0].smiles if datapoint.ligands else None
+        
         if metrics["confidence_scores"] or metrics["ligand_iptm"] or metrics["protein_iptm"]:
-            is_allosteric, variance_stats = is_allosteric_binder(metrics)
+            is_allosteric, detection_stats = is_allosteric_binder(metrics, ligand_smiles=ligand_smiles)
             
-            print(f"\nVariance Statistics:")
-            print(f"  Confidence Score Std Dev: {variance_stats.get('confidence_std', 0.0):.6f} (threshold: {CONFIDENCE_STD_THRESHOLD})")
-            print(f"  Ligand iPTM Std Dev: {variance_stats.get('ligand_iptm_std', 0.0):.6f} (threshold: {LIGAND_IPTM_STD_THRESHOLD})")
-            print(f"  Protein iPTM Std Dev: {variance_stats.get('protein_iptm_std', 0.0):.6f} (threshold: {IPTM_STD_THRESHOLD})")
-            print(f"\nBinding Type: {'ALLOSTERIC' if is_allosteric else 'ORTHOSTERIC'}")
+            print(f"\n{'='*60}")
+            print(f"ALLOSTERIC DETECTION RESULTS")
+            print(f"{'='*60}")
+            print(f"\n1. Variance-Based Detection:")
+            print(f"  Confidence Score Std Dev: {detection_stats.get('confidence_std', 0.0):.6f} (threshold: {CONFIDENCE_STD_THRESHOLD})")
+            print(f"  Ligand iPTM Std Dev: {detection_stats.get('ligand_iptm_std', 0.0):.6f} (threshold: {LIGAND_IPTM_STD_THRESHOLD})")
+            print(f"  Protein iPTM Std Dev: {detection_stats.get('protein_iptm_std', 0.0):.6f} (threshold: {IPTM_STD_THRESHOLD})")
+            print(f"  Allosteric by variance: {'YES' if detection_stats.get('allosteric_by_variance') else 'NO'}")
             
-            # Save variance analysis to file
-            variance_file = subdir / "variance_analysis.json"
-            with open(variance_file, "w") as f:
+            print(f"\n2. Ligand Similarity-Based Detection:")
+            if ligand_smiles and RDKIT_AVAILABLE:
+                print(f"  Max similarity to allosteric ligands: {detection_stats.get('max_ligand_similarity', 0.0):.3f} (threshold: {LIGAND_SIMILARITY_THRESHOLD})")
+                print(f"  Allosteric by similarity: {'YES' if detection_stats.get('allosteric_by_similarity') else 'NO'}")
+                if detection_stats.get('allosteric_by_similarity'):
+                    print(f"  Most similar allosteric ligand: {detection_stats.get('most_similar_allosteric_ligand', 'N/A')[:50]}...")
+            else:
+                print(f"  Ligand similarity checking: DISABLED (RDKit not available or no ligand)")
+            
+            print(f"\n{'='*60}")
+            print(f"FINAL CLASSIFICATION: {'ALLOSTERIC' if is_allosteric else 'ORTHOSTERIC'}")
+            if is_allosteric:
+                methods = detection_stats.get('detection_method', [])
+                print(f"Detection method(s): {', '.join(methods).upper()}")
+            print(f"{'='*60}")
+            
+            # Save detection analysis to file
+            detection_file = subdir / "allosteric_detection.json"
+            with open(detection_file, "w") as f:
                 json.dump({
                     "is_allosteric": is_allosteric,
-                    "variance_stats": variance_stats,
+                    "detection_stats": detection_stats,
                     "metrics": metrics,
+                    "ligand_smiles": ligand_smiles,
                     "thresholds": {
                         "confidence_std": CONFIDENCE_STD_THRESHOLD,
                         "ligand_iptm_std": LIGAND_IPTM_STD_THRESHOLD,
-                        "protein_iptm_std": IPTM_STD_THRESHOLD
+                        "protein_iptm_std": IPTM_STD_THRESHOLD,
+                        "ligand_similarity": LIGAND_SIMILARITY_THRESHOLD
                     }
                 }, f, indent=2)
-            print(f"Variance analysis saved to: {variance_file}")
+            print(f"\nAllosteric detection analysis saved to: {detection_file}")
         else:
             print("WARNING: Could not extract confidence metrics from predictions")
             is_allosteric = False

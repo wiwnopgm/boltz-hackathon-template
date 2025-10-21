@@ -175,3 +175,6 @@ abag_public_evaluation/
 test_negative_pocket_v2_results/
 test_negative_pocket_v3_results/
 test_negative_pocket_v4_results/
+test_negative_pocket_v5_results/
+
+test_pipeline_results/
