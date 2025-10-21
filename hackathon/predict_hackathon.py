@@ -7,7 +7,7 @@ import subprocess
 import math
 from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import numpy as np
 import yaml
@@ -22,6 +22,13 @@ MODEL_COUNT = 5
 LIG_NAME = "LIG"
 RMSD_CUTOFF = 2.0   # Å
 CONTACT_CUTOFF = 4.5  # Å
+
+# Variance thresholds for allosteric detection (based on variance_comparison_ortho_allo.csv)
+# Orthosteric: ~0.0023, Allosteric: ~0.0115
+CONFIDENCE_STD_THRESHOLD = 0.005  
+# Orthosteric: ~0.0025, Allosteric: ~0.031
+IPTM_STD_THRESHOLD = 0.01
+LIGAND_IPTM_STD_THRESHOLD = 0.01
 
 def _load_structure(path: Path):
     """Load a PDB structure."""
@@ -187,6 +194,85 @@ def identify_orthosteric_pocket(prediction_dir: Path) -> Set[Tuple[str, str, int
     
     return contacts
 
+def extract_confidence_metrics(prediction_output_dir: Path, datapoint_id: str) -> Dict[str, List[float]]:
+    """
+    Extract confidence metrics from Boltz prediction outputs.
+    
+    Args:
+        prediction_output_dir: Directory containing Boltz prediction outputs
+        datapoint_id: ID of the datapoint
+        
+    Returns:
+        Dictionary with lists of confidence scores, ligand iPTM, and protein iPTM for each model
+    """
+    metrics = {
+        "confidence_scores": [],
+        "ligand_iptm": [],
+        "protein_iptm": []
+    }
+    
+    # Try to find individual model confidence JSON files (format: confidence_{datapoint_id}_model_{i}.json)
+    for i in range(MODEL_COUNT):
+        # Try the standard naming pattern used by Boltz
+        confidence_file = prediction_output_dir / f"confidence_{datapoint_id}_model_{i}.json"
+        
+        if confidence_file.exists():
+            try:
+                with open(confidence_file) as f:
+                    data = json.load(f)
+                    if "confidence_score" in data:
+                        metrics["confidence_scores"].append(data["confidence_score"])
+                    if "ligand_iptm" in data:
+                        metrics["ligand_iptm"].append(data["ligand_iptm"])
+                    if "iptm" in data:
+                        metrics["protein_iptm"].append(data["iptm"])
+            except Exception as e:
+                print(f"WARNING: Could not parse {confidence_file}: {e}")
+    
+    # If no files found, report the issue
+    if not metrics["confidence_scores"] and not metrics["ligand_iptm"] and not metrics["protein_iptm"]:
+        print(f"WARNING: No confidence files found in {prediction_output_dir}")
+        print(f"         Looking for pattern: confidence_{datapoint_id}_model_*.json")
+    
+    return metrics
+
+def is_allosteric_binder(metrics: Dict[str, List[float]]) -> Tuple[bool, Dict[str, float]]:
+    """
+    Determine if binding is allosteric based on variance in confidence metrics.
+    
+    Args:
+        metrics: Dictionary with lists of confidence scores, ligand iPTM, and protein iPTM
+        
+    Returns:
+        Tuple of (is_allosteric, variance_stats)
+    """
+    variance_stats = {}
+    
+    # Compute standard deviations
+    if len(metrics["confidence_scores"]) > 1:
+        variance_stats["confidence_std"] = float(np.std(metrics["confidence_scores"]))
+    else:
+        variance_stats["confidence_std"] = 0.0
+    
+    if len(metrics["ligand_iptm"]) > 1:
+        variance_stats["ligand_iptm_std"] = float(np.std(metrics["ligand_iptm"]))
+    else:
+        variance_stats["ligand_iptm_std"] = 0.0
+    
+    if len(metrics["protein_iptm"]) > 1:
+        variance_stats["protein_iptm_std"] = float(np.std(metrics["protein_iptm"]))
+    else:
+        variance_stats["protein_iptm_std"] = 0.0
+    
+    # Determine if allosteric based on thresholds
+    is_allosteric = (
+        variance_stats["confidence_std"] > CONFIDENCE_STD_THRESHOLD or
+        variance_stats["ligand_iptm_std"] > LIGAND_IPTM_STD_THRESHOLD or
+        variance_stats["protein_iptm_std"] > IPTM_STD_THRESHOLD
+    )
+    
+    return is_allosteric, variance_stats
+
 # ---------------------------------------------------------------------------
 # ---- Participants should modify these four functions ----------------------
 # ---------------------------------------------------------------------------
@@ -224,7 +310,7 @@ def prepare_protein_complex(datapoint_id: str, proteins: List[Protein], input_di
     cli_args = ["--diffusion_samples", "5", "--use_potentials"]
     return [(input_dict, cli_args)]
 
-def prepare_protein_ligand(datapoint_id: str, protein: Protein, ligands: list[SmallMolecule], input_dict: dict, msa_dir: Optional[Path] = None) -> List[tuple[dict, List[str]]]:
+def prepare_protein_ligand(datapoint_id: str, protein: Protein, ligands: list[SmallMolecule], input_dict: dict, msa_dir: Optional[Path] = None, is_allosteric: bool = False) -> List[tuple[dict, List[str]]]:
     """
     Prepare input dict and CLI args for a protein-ligand prediction.
     You can return multiple configurations to run by returning a list of (input_dict, cli_args) tuples.
@@ -232,8 +318,9 @@ def prepare_protein_ligand(datapoint_id: str, protein: Protein, ligands: list[Sm
         datapoint_id: The unique identifier for this datapoint
         protein: The protein sequence
         ligands: A list of a single small molecule ligand object 
-        input_dict: Prefilled input dict (may already contain negative_pocket constraint from Stage 2)
+        input_dict: Prefilled input dict (may already contain negative_pocket constraint if allosteric)
         msa_dir: Directory containing MSA files (for computing relative paths)
+        is_allosteric: Whether the binding is detected as allosteric based on variance
     Returns:
         List of tuples of (final input dict that will get exported as YAML, list of CLI args). Each tuple represents a separate configuration to run.
     """
@@ -241,7 +328,7 @@ def prepare_protein_ligand(datapoint_id: str, protein: Protein, ligands: list[Sm
     # `protein` is a single-chain target protein sequence with id A
     # `ligands` contains a single small molecule ligand object with unknown binding sites
     # 
-    # If orthosteric pocket was identified in Stage 2, input_dict will already contain
+    # If allosteric binding is detected (is_allosteric=True), input_dict will already contain
     # a negative_pocket constraint in the format:
     # ```
     # "constraints": [{
@@ -271,6 +358,9 @@ def prepare_protein_ligand(datapoint_id: str, protein: Protein, ligands: list[Sm
     # Example: predict 5 structures
     cli_args = ["--diffusion_samples", "5", "--use_potentials"]
     
+    # For allosteric binders, negative_pocket constraint is already added in input_dict
+    # You can add additional modifications here if needed
+    
     return [(input_dict, cli_args)]
 
 def post_process_protein_complex(datapoint: Datapoint, input_dicts: List[dict[str, Any]], cli_args_list: List[list[str]], prediction_dirs: List[Path]) -> List[Path]:
@@ -294,7 +384,7 @@ def post_process_protein_complex(datapoint: Datapoint, input_dicts: List[dict[st
     all_pdbs = sorted(all_pdbs)
     return all_pdbs
 
-def post_process_protein_ligand(datapoint: Datapoint, input_dicts: List[dict[str, Any]], cli_args_list: List[list[str]], prediction_dirs: List[Path], pocket_residues: Optional[Set[Tuple[str, str, int]]] = None, unconstrained_dir: Optional[Path] = None) -> List[Path]:
+def post_process_protein_ligand(datapoint: Datapoint, input_dicts: List[dict[str, Any]], cli_args_list: List[list[str]], prediction_dirs: List[Path], pocket_residues: Optional[Set[Tuple[str, str, int]]] = None, unconstrained_dir: Optional[Path] = None, is_allosteric: bool = False) -> List[Path]:
     """
     Return ranked model files for protein-ligand submission.
     Args:
@@ -304,6 +394,7 @@ def post_process_protein_ligand(datapoint: Datapoint, input_dicts: List[dict[str
         prediction_dirs: List of directories containing prediction results (one per config)
         pocket_residues: Optional set of orthosteric pocket residues
         unconstrained_dir: Optional directory containing unconstrained prediction models
+        is_allosteric: If True, filter structures by pocket RMSD > 4A
     Returns: 
         Sorted pdb file paths that should be used as your submission.
     """
@@ -316,10 +407,73 @@ def post_process_protein_ligand(datapoint: Datapoint, input_dicts: List[dict[str
     # Sort all PDBs
     all_pdbs = sorted(all_pdbs)
     
-    # Calculate pocket RMSD for unconstrained structures if available
+    # For allosteric binders, filter structures based on pocket RMSD
+    if is_allosteric and pocket_residues and len(all_pdbs) > 0:
+        print(f"\n{'='*80}")
+        print(f"Filtering ALLOSTERIC structures by pocket RMSD")
+        print(f"{'='*80}\n")
+        
+        # Load all predicted structures
+        pred_structs = []
+        for pdb_path in all_pdbs:
+            try:
+                pred_structs.append((pdb_path, _load_structure(pdb_path)))
+            except Exception as e:
+                print(f"WARNING: Could not load {pdb_path}: {e}")
+        
+        if len(pred_structs) >= 2:
+            # Use first structure as reference
+            ref_path, ref_struct = pred_structs[0]
+            
+            # Superpose all structures to reference
+            for _, struct in pred_structs[1:]:
+                _superpose_structure(ref_struct, struct)
+            
+            # Calculate pocket RMSD and filter
+            print(f"Pocket RMSD analysis for allosteric predictions ({len(pocket_residues)} pocket residues):")
+            print(f"{'Model':<40} {'Pocket RMSD (Å)':<18} {'Status':<20}")
+            print("-" * 80)
+            
+            filtered_pdbs = []
+            unfiltered_pdbs = []
+            
+            for pdb_path, struct in pred_structs:
+                if pdb_path == ref_path:
+                    rmsd = 0.0  # Reference to itself
+                else:
+                    rmsd = _calculate_pocket_rmsd_between_structures(ref_struct, struct, pocket_residues)
+                
+                if rmsd is not None:
+                    # For allosteric binders, we want RMSD > 4A (far from orthosteric pocket)
+                    if rmsd > 4.0:
+                        status = "PASS (> 4 Å)"
+                        filtered_pdbs.append(pdb_path)
+                    else:
+                        status = "FILTERED (≤ 4 Å)"
+                    unfiltered_pdbs.append(pdb_path)
+                    print(f"{pdb_path.name:<40} {rmsd:>8.2f}             {status}")
+                else:
+                    # If can't calculate, keep it
+                    print(f"{pdb_path.name:<40} {'N/A':>8}             PASS (cannot calc)")
+                    filtered_pdbs.append(pdb_path)
+                    unfiltered_pdbs.append(pdb_path)
+            
+            print("-" * 80)
+            print(f"Filtered structures (RMSD > 4 Å from orthosteric pocket): {len(filtered_pdbs)}/{len(pred_structs)}")
+            
+            # If all structures filtered out, use unfiltered set
+            if len(filtered_pdbs) == 0:
+                print("WARNING: All structures filtered out. Using unfiltered set.")
+                all_pdbs = sorted(unfiltered_pdbs)
+            else:
+                print(f"Using {len(filtered_pdbs)} structures that pass RMSD > 4 Å filter")
+                all_pdbs = sorted(filtered_pdbs)
+            print()
+    
+    # Calculate pocket RMSD for unconstrained structures if available (for reference)
     if pocket_residues and unconstrained_dir and unconstrained_dir.exists():
         print(f"\n{'='*80}")
-        print(f"Computing pocket RMSD for unconstrained structures")
+        print(f"Computing pocket RMSD for unconstrained structures (reference)")
         print(f"{'='*80}\n")
         
         unconstrained_paths = [unconstrained_dir / f"model_{i}.pdb" for i in range(5)]
@@ -404,7 +558,7 @@ ap.add_argument("--result-folder", type=Path, required=False, default=None,
 
 args = ap.parse_args()
 
-def _prefill_input_dict(datapoint_id: str, proteins: Iterable[Protein], ligands: Optional[list[SmallMolecule]] = None, msa_dir: Optional[Path] = None, constraints: Optional[list] = None, pocket_residues: Optional[Set[Tuple[str, str, int]]] = None) -> dict:
+def _prefill_input_dict(datapoint_id: str, proteins: Iterable[Protein], ligands: Optional[list[SmallMolecule]] = None, msa_dir: Optional[Path] = None, constraints: Optional[list] = None, pocket_residues: Optional[Set[Tuple[str, str, int]]] = None, is_allosteric: bool = False) -> dict:
     """
     Prepare input dict for Boltz YAML.
     
@@ -415,7 +569,8 @@ def _prefill_input_dict(datapoint_id: str, proteins: Iterable[Protein], ligands:
         msa_dir: Directory containing MSA files
         constraints: Optional list of constraint dictionaries
         pocket_residues: Optional set of orthosteric pocket residues (chain_id, resname, residue_number)
-                        Will be added as negative_pocket constraint if provided
+                        Will be added as negative_pocket constraint if is_allosteric is True
+        is_allosteric: If True, add negative_pocket constraint to avoid orthosteric pocket
     
     Returns:
         Dictionary ready for YAML export
@@ -462,7 +617,8 @@ def _prefill_input_dict(datapoint_id: str, proteins: Iterable[Protein], ligands:
     all_constraints = list(constraints) if constraints else []
     
     # Add negative_pocket constraint from identified orthosteric pocket residues
-    if pocket_residues and ligands:
+    # Only add for allosteric binders to force binding away from orthosteric pocket
+    if pocket_residues and ligands and is_allosteric:
         ligand_id = ligands[0].id  # Typically "B" for protein-ligand
         contacts = [[chain, resi] for chain, resn, resi in sorted(pocket_residues)]
         
@@ -476,7 +632,7 @@ def _prefill_input_dict(datapoint_id: str, proteins: Iterable[Protein], ligands:
         }
         all_constraints.append(negative_pocket_constraint)
         
-        print(f"  Added negative_pocket constraint with {len(contacts)} residues (min_distance=10.0 Å)")
+        print(f"  Added negative_pocket constraint for ALLOSTERIC binding with {len(contacts)} residues (min_distance=10.0 Å)")
     
     # Add all constraints to the document
     if all_constraints:
@@ -487,15 +643,19 @@ def _prefill_input_dict(datapoint_id: str, proteins: Iterable[Protein], ligands:
 def _run_boltz_and_collect(datapoint) -> None:
     """
     New flow: prepare input dict, write yaml, run boltz, post-process, copy submissions.
-    For protein_ligand: First run unconstrained predictions to identify orthosteric pocket.
+    For protein_ligand: First run unconstrained predictions to identify orthosteric pocket
+    and detect allosteric binding based on confidence variance.
     """
     out_dir = args.intermediate_dir / "predictions"
     out_dir.mkdir(parents=True, exist_ok=True)
     subdir = args.submission_dir / datapoint.datapoint_id
     subdir.mkdir(parents=True, exist_ok=True)
 
-    # For protein_ligand: Run unconstrained predictions first to identify pocket
+    # For protein_ligand: Run unconstrained predictions first to identify pocket and detect allosteric binding
     pocket_residues = None
+    is_allosteric = False
+    variance_stats = None
+    
     if datapoint.task_type == "protein_ligand":
         print(f"\n{'='*80}")
         print(f"Stage 1: Running unconstrained predictions to identify orthosteric pocket")
@@ -547,10 +707,41 @@ def _run_boltz_and_collect(datapoint) -> None:
         
         # Identify orthosteric pocket
         print(f"\n{'='*80}")
-        print(f"Stage 2: Identifying orthosteric pocket residues")
+        print(f"Stage 2: Identifying orthosteric pocket residues and detecting allosteric binding")
         print(f"{'='*80}\n")
         
         pocket_residues = identify_orthosteric_pocket(temp_pocket_dir)
+        
+        # Extract confidence metrics and determine if allosteric
+        print(f"\nAnalyzing confidence variance to detect allosteric binding...")
+        metrics = extract_confidence_metrics(unconstrained_pred_dir, f"{datapoint.datapoint_id}_unconstrained")
+        
+        if metrics["confidence_scores"] or metrics["ligand_iptm"] or metrics["protein_iptm"]:
+            is_allosteric, variance_stats = is_allosteric_binder(metrics)
+            
+            print(f"\nVariance Statistics:")
+            print(f"  Confidence Score Std Dev: {variance_stats.get('confidence_std', 0.0):.6f} (threshold: {CONFIDENCE_STD_THRESHOLD})")
+            print(f"  Ligand iPTM Std Dev: {variance_stats.get('ligand_iptm_std', 0.0):.6f} (threshold: {LIGAND_IPTM_STD_THRESHOLD})")
+            print(f"  Protein iPTM Std Dev: {variance_stats.get('protein_iptm_std', 0.0):.6f} (threshold: {IPTM_STD_THRESHOLD})")
+            print(f"\nBinding Type: {'ALLOSTERIC' if is_allosteric else 'ORTHOSTERIC'}")
+            
+            # Save variance analysis to file
+            variance_file = subdir / "variance_analysis.json"
+            with open(variance_file, "w") as f:
+                json.dump({
+                    "is_allosteric": is_allosteric,
+                    "variance_stats": variance_stats,
+                    "metrics": metrics,
+                    "thresholds": {
+                        "confidence_std": CONFIDENCE_STD_THRESHOLD,
+                        "ligand_iptm_std": LIGAND_IPTM_STD_THRESHOLD,
+                        "protein_iptm_std": IPTM_STD_THRESHOLD
+                    }
+                }, f, indent=2)
+            print(f"Variance analysis saved to: {variance_file}")
+        else:
+            print("WARNING: Could not extract confidence metrics from predictions")
+            is_allosteric = False
         
         # Save pocket residues to file
         pocket_file = subdir / "orthosteric_pocket.txt"
@@ -568,24 +759,25 @@ def _run_boltz_and_collect(datapoint) -> None:
             print(f"  Chain {chain}, {resn} {resi}")
         
         print(f"\n{'='*80}")
-        print(f"Stage 3: Running final predictions (can use pocket info if needed)")
+        print(f"Stage 3: Running final predictions with {'negative pocket constraints (allosteric)' if is_allosteric else 'identified pocket info'}")
         print(f"{'='*80}\n")
 
     # Prepare input dict and CLI args for final predictions
-    # Pass pocket_residues to _prefill_input_dict so they can be accessed in prepare_* functions
+    # Pass pocket_residues and is_allosteric flag to _prefill_input_dict
     base_input_dict = _prefill_input_dict(
         datapoint.datapoint_id, 
         datapoint.proteins, 
         datapoint.ligands, 
         args.msa_dir, 
         datapoint.constraints,
-        pocket_residues=pocket_residues  # Pass identified pocket residues
+        pocket_residues=pocket_residues,  # Pass identified pocket residues
+        is_allosteric=is_allosteric  # Pass allosteric detection flag
     )
 
     if datapoint.task_type == "protein_complex":
         configs = prepare_protein_complex(datapoint.datapoint_id, datapoint.proteins, base_input_dict, args.msa_dir)
     elif datapoint.task_type == "protein_ligand":
-        configs = prepare_protein_ligand(datapoint.datapoint_id, datapoint.proteins[0], datapoint.ligands, base_input_dict, args.msa_dir)
+        configs = prepare_protein_ligand(datapoint.datapoint_id, datapoint.proteins[0], datapoint.ligands, base_input_dict, args.msa_dir, is_allosteric=is_allosteric)
     else:
         raise ValueError(f"Unknown task_type: {datapoint.task_type}")
 
@@ -641,11 +833,12 @@ def _run_boltz_and_collect(datapoint) -> None:
     if datapoint.task_type == "protein_complex":
         ranked_files = post_process_protein_complex(datapoint, all_input_dicts, all_cli_args, all_pred_subfolders)
     elif datapoint.task_type == "protein_ligand":
-        # Pass pocket residues and unconstrained prediction directory for RMSD analysis
+        # Pass pocket residues, unconstrained prediction directory, and allosteric flag for RMSD analysis
         unconstrained_dir = subdir / "unconstrained_for_pocket" if pocket_residues else None
         ranked_files = post_process_protein_ligand(
             datapoint, all_input_dicts, all_cli_args, all_pred_subfolders, 
-            pocket_residues=pocket_residues, unconstrained_dir=unconstrained_dir
+            pocket_residues=pocket_residues, unconstrained_dir=unconstrained_dir,
+            is_allosteric=is_allosteric
         )
     else:
         raise ValueError(f"Unknown task_type: {datapoint.task_type}")
