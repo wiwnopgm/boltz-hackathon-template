@@ -601,71 +601,94 @@ def post_process_protein_ligand(datapoint: Datapoint, input_dicts: List[dict[str
                     print(f"WARNING: Could not load {path}: {e}")
         
         if len(unconstrained_structs) > 0:
-            # Extract ligand coordinates from all unconstrained structures
-            unconstrained_ligands = []
-            for struct in unconstrained_structs:
-                lig_coords = _ligand_coords(struct)
-                if lig_coords:
-                    unconstrained_ligands.append(lig_coords)
+            # Load all predicted structures
+            pred_structs = []
+            for pdb_path in all_pdbs:
+                try:
+                    pred_structs.append((pdb_path, _load_structure(pdb_path)))
+                except Exception as e:
+                    print(f"WARNING: Could not load {pdb_path}: {e}")
             
-            if len(unconstrained_ligands) > 0:
-                # Load predicted structures and calculate ligand RMSD
-                print(f"Ligand RMSD analysis for allosteric predictions (vs {len(unconstrained_ligands)} unconstrained models):")
-                print(f"{'Model':<40} {'Min Lig RMSD (Å)':<18} {'Avg Lig RMSD (Å)':<18} {'Status':<20}")
-                print("-" * 100)
+            if len(pred_structs) > 0:
+                # Use first unconstrained structure as reference for alignment
+                ref_struct = unconstrained_structs[0]
                 
-                filtered_pdbs = []
+                # Superpose all unconstrained structures to the reference
+                print(f"Aligning {len(unconstrained_structs)} unconstrained structures to reference...")
+                for struct in unconstrained_structs[1:]:
+                    _superpose_structure(ref_struct, struct)
                 
-                for pdb_path in all_pdbs:
-                    try:
-                        pred_struct = _load_structure(pdb_path)
-                        pred_lig = _ligand_coords(pred_struct)
-                        
-                        if pred_lig:
-                            # Calculate RMSD to all unconstrained ligands
-                            rmsds = []
-                            for unc_lig in unconstrained_ligands:
-                                rmsd = _ligand_rmsd(pred_lig, unc_lig)
-                                if rmsd != float("inf"):
-                                    rmsds.append(rmsd)
+                # Superpose all predicted structures to the same reference
+                print(f"Aligning {len(pred_structs)} predicted structures to reference...")
+                for _, struct in pred_structs:
+                    _superpose_structure(ref_struct, struct)
+                
+                # Extract ligand coordinates from all unconstrained structures (after alignment)
+                unconstrained_ligands = []
+                for struct in unconstrained_structs:
+                    lig_coords = _ligand_coords(struct)
+                    if lig_coords:
+                        unconstrained_ligands.append(lig_coords)
+                
+                if len(unconstrained_ligands) > 0:
+                    # Calculate ligand RMSD for each predicted structure (using already-aligned structures)
+                    print(f"Ligand RMSD analysis for allosteric predictions (vs {len(unconstrained_ligands)} unconstrained models):")
+                    print(f"{'Model':<40} {'Min Lig RMSD (Å)':<18} {'Avg Lig RMSD (Å)':<18} {'Status':<20}")
+                    print("-" * 100)
+                    
+                    filtered_pdbs = []
+                    
+                    for pdb_path, pred_struct in pred_structs:
+                        try:
+                            pred_lig = _ligand_coords(pred_struct)
                             
-                            if rmsds:
-                                min_rmsd = min(rmsds)
-                                avg_rmsd = np.mean(rmsds)
+                            if pred_lig:
+                                # Calculate RMSD to all unconstrained ligands (already aligned)
+                                rmsds = []
+                                for unc_lig in unconstrained_ligands:
+                                    rmsd = _ligand_rmsd(pred_lig, unc_lig)
+                                    if rmsd != float("inf"):
+                                        rmsds.append(rmsd)
                                 
-                                # For allosteric binders, we want ligand RMSD > 2A (different binding site)
-                                if min_rmsd > 2.0:
-                                    status = "PASS (> 2 Å)"
-                                    filtered_pdbs.append(pdb_path)
+                                if rmsds:
+                                    min_rmsd = min(rmsds)
+                                    avg_rmsd = np.mean(rmsds)
+                                    
+                                    # For allosteric binders, we want ligand RMSD > 2A (different binding site)
+                                    if min_rmsd > 2.0:
+                                        status = "PASS (> 2 Å)"
+                                        filtered_pdbs.append(pdb_path)
+                                    else:
+                                        status = "FILTERED (≤ 2 Å)"
+                                    
+                                    print(f"{pdb_path.name:<40} {min_rmsd:>8.2f}             {avg_rmsd:>8.2f}             {status}")
                                 else:
-                                    status = "FILTERED (≤ 2 Å)"
-                                
-                                print(f"{pdb_path.name:<40} {min_rmsd:>8.2f}             {avg_rmsd:>8.2f}             {status}")
+                                    # If can't calculate, keep it
+                                    print(f"{pdb_path.name:<40} {'N/A':>8}             {'N/A':>8}             PASS (cannot calc)")
+                                    filtered_pdbs.append(pdb_path)
                             else:
-                                # If can't calculate, keep it
-                                print(f"{pdb_path.name:<40} {'N/A':>8}             {'N/A':>8}             PASS (cannot calc)")
+                                # No ligand found, keep it anyway
+                                print(f"{pdb_path.name:<40} {'N/A':>8}             {'N/A':>8}             PASS (no ligand)")
                                 filtered_pdbs.append(pdb_path)
-                        else:
-                            # No ligand found, keep it anyway
-                            print(f"{pdb_path.name:<40} {'N/A':>8}             {'N/A':>8}             PASS (no ligand)")
-                            filtered_pdbs.append(pdb_path)
-                            
-                    except Exception as e:
-                        print(f"WARNING: Could not process {pdb_path}: {e}")
-                        filtered_pdbs.append(pdb_path)  # Keep on error
-                
-                print("-" * 100)
-                print(f"Filtered structures (ligand RMSD > 2 Å from unconstrained): {len(filtered_pdbs)}/{len(all_pdbs)}")
-                
-                # If all structures filtered out, use unfiltered set
-                if len(filtered_pdbs) == 0:
-                    print("WARNING: All structures filtered out by ligand RMSD. Using unfiltered set.")
+                                
+                        except Exception as e:
+                            print(f"WARNING: Could not process {pdb_path}: {e}")
+                            filtered_pdbs.append(pdb_path)  # Keep on error
+                    
+                    print("-" * 100)
+                    print(f"Filtered structures (ligand RMSD > 2 Å from unconstrained): {len(filtered_pdbs)}/{len(all_pdbs)}")
+                    
+                    # If all structures filtered out, use unfiltered set
+                    if len(filtered_pdbs) == 0:
+                        print("WARNING: All structures filtered out by ligand RMSD. Using unfiltered set.")
+                    else:
+                        print(f"Using {len(filtered_pdbs)} structures that pass ligand RMSD > 2 Å filter")
+                        all_pdbs = sorted(filtered_pdbs)
+                    print()
                 else:
-                    print(f"Using {len(filtered_pdbs)} structures that pass ligand RMSD > 2 Å filter")
-                    all_pdbs = sorted(filtered_pdbs)
-                print()
+                    print("WARNING: No ligands found in unconstrained structures. Skipping ligand RMSD filter.")
             else:
-                print("WARNING: No ligands found in unconstrained structures. Skipping ligand RMSD filter.")
+                print("WARNING: Could not load predicted structures. Skipping ligand RMSD filter.")
         else:
             print("WARNING: Could not load unconstrained structures. Skipping ligand RMSD filter.")
     
@@ -781,6 +804,84 @@ def post_process_protein_ligand(datapoint: Datapoint, input_dicts: List[dict[str
                 if high_rmsd_count > 0:
                     print(f"Number of structures with pocket RMSD > 4 Å: {high_rmsd_count}/{len(rmsds)-1}")
             print()
+    
+    # Rank structures by ligand iPTM scores
+    print(f"\n{'='*80}")
+    print(f"Ranking structures by ligand iPTM scores")
+    print(f"{'='*80}\n")
+    
+    # Extract ligand iPTM scores for each structure
+    pdb_scores = []
+    for pdb_path in all_pdbs:
+        # Parse the PDB filename to extract config and model indices
+        # Format: {datapoint_id}_config_{config_idx}_model_{model_idx}.pdb
+        filename = pdb_path.stem  # Remove .pdb extension
+        parts = filename.split("_")
+        
+        try:
+            # Find config and model indices
+            config_idx = None
+            model_idx = None
+            for i, part in enumerate(parts):
+                if part == "config" and i + 1 < len(parts):
+                    config_idx = parts[i + 1]
+                elif part == "model" and i + 1 < len(parts):
+                    model_idx = parts[i + 1]
+            
+            if config_idx is not None and model_idx is not None:
+                # Find the prediction directory for this config
+                pred_dir = None
+                for prediction_dir in prediction_dirs:
+                    if f"config_{config_idx}" in str(prediction_dir):
+                        pred_dir = prediction_dir
+                        break
+                
+                if pred_dir:
+                    # Look for confidence file
+                    confidence_file = pred_dir / f"confidence_{datapoint.datapoint_id}_config_{config_idx}_model_{model_idx}.json"
+                    
+                    if confidence_file.exists():
+                        try:
+                            with open(confidence_file) as f:
+                                data = json.load(f)
+                                ligand_iptm = data.get("ligand_iptm", None)
+                                if ligand_iptm is not None:
+                                    pdb_scores.append((pdb_path, ligand_iptm))
+                                else:
+                                    print(f"WARNING: No ligand_iptm found in {confidence_file.name}")
+                                    pdb_scores.append((pdb_path, -1.0))  # Use -1 for missing scores
+                        except Exception as e:
+                            print(f"WARNING: Could not parse {confidence_file}: {e}")
+                            pdb_scores.append((pdb_path, -1.0))
+                    else:
+                        print(f"WARNING: Confidence file not found: {confidence_file}")
+                        pdb_scores.append((pdb_path, -1.0))
+                else:
+                    print(f"WARNING: Could not find prediction directory for config {config_idx}")
+                    pdb_scores.append((pdb_path, -1.0))
+            else:
+                print(f"WARNING: Could not parse config/model indices from {pdb_path.name}")
+                pdb_scores.append((pdb_path, -1.0))
+        except Exception as e:
+            print(f"WARNING: Error processing {pdb_path.name}: {e}")
+            pdb_scores.append((pdb_path, -1.0))
+    
+    # Sort by ligand iPTM score (descending - higher is better)
+    pdb_scores.sort(key=lambda x: x[1], reverse=True)
+    
+    # Display ranking
+    print(f"{'Rank':<8} {'Model':<40} {'Ligand iPTM':<15}")
+    print("-" * 80)
+    for rank, (pdb_path, score) in enumerate(pdb_scores, 1):
+        if score >= 0:
+            print(f"{rank:<8} {pdb_path.name:<40} {score:<15.4f}")
+        else:
+            print(f"{rank:<8} {pdb_path.name:<40} {'N/A':<15}")
+    print("-" * 80)
+    print(f"Ranked {len(pdb_scores)} structures by ligand iPTM score\n")
+    
+    # Return ranked PDB paths
+    all_pdbs = [pdb_path for pdb_path, _ in pdb_scores]
     
     return all_pdbs
 
