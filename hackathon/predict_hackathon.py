@@ -73,7 +73,9 @@ def create_pocket_constraints(residue_indices, protein_chain_id, ligand_id="B"):
     
     return {
         "binder": ligand_id,
-        "contacts": contacts
+        "contacts": contacts,
+        "max_distance": 2.0,
+        "force": True
     }
 
 # ---------------------------------------------------------------------------
@@ -126,51 +128,55 @@ def prepare_protein_ligand(datapoint_id: str, protein: Protein, ligands: list[Sm
     Returns:
         List of tuples of (final input dict that will get exported as YAML, list of CLI args). Each tuple represents a separate configuration to run.
     """
+    
 
-    # Extract protein sequence and ligand SMILES
-    protein_sequence = protein.sequence
-    ligand_smiles = ligands[0].smiles if ligands else ""
-    
-    # Run binding site prediction
-    binding_results = predict_binding_sites(
-        protein_sequence=protein_sequence,
-        smiles=ligand_smiles,
-        output_dir=f"binding_output/{datapoint_id}/"
-    )
-    
-    print(f"Binding site prediction completed for {datapoint_id}")
-    print(f"Found {len(binding_results['binding_probabilities'])} residues with binding probabilities")
-    print(f"Results saved to: {binding_results['result_csv_path']}")
-    
-    # Extract top N binding site predictions and create pocket constraints
-    # You can customize these parameters:
-    top_n_predictions = 3 # Number of top predictions to use
-    binding_threshold = 0.8  # Minimum binding probability threshold
-    
-    # Get top binding site positions
-    binding_probs = binding_results['binding_probabilities']
-    top_indices = get_top_binding_sites(binding_probs, top_n_predictions, binding_threshold)
-    
-    print(f"Selected {len(top_indices)} binding site positions: {top_indices}")
-    
-    # Create pocket constraints for the input dictionary
-    pocket_constraints = create_pocket_constraints(top_indices, protein.id, ligands[0].id if ligands else "B")
-    
-    # Add pocket constraints to input_dict
-    if "constraints" not in input_dict:
-        input_dict["constraints"] = []
-    
-    input_dict["constraints"].append({
-        "pocket": pocket_constraints
-    })
+    # Check if automatic pocket scanning is enabled
+    if args.use_auto_pocket_scanner:
+        # Extract protein sequence and ligand SMILES
+        protein_sequence = protein.sequence
+        ligand_smiles = ligands[0].smiles if ligands else ""
+        
+        # Run binding site prediction
+        binding_results = predict_binding_sites(
+            protein_sequence=protein_sequence,
+            smiles=ligand_smiles,
+            output_dir=f"binding_output/{datapoint_id}/"
+        )
+        
+        print(f"Binding site prediction completed for {datapoint_id}")
+        print(f"Found {len(binding_results['binding_probabilities'])} residues with binding probabilities")
+        print(f"Results saved to: {binding_results['result_csv_path']}")
+        
+        # Extract top N binding site predictions and create pocket constraints
+        # You can customize these parameters:
+        top_n_predictions = 5 # Number of top predictions to use
+        binding_threshold = 0.8  # Minimum binding probability threshold
+        
+        # Get top binding site positions
+        binding_probs = binding_results['binding_probabilities']
+        top_indices = get_top_binding_sites(binding_probs, top_n_predictions, binding_threshold)
+        
+        print(f"Selected {len(top_indices)} binding site positions: {top_indices}")
+        
+        # Create pocket constraints for the input dictionary
+        pocket_constraints = create_pocket_constraints(top_indices, protein.id, ligands[0].id if ligands else "B")
+        
+        # Add pocket constraints to input_dict
+        if "constraints" not in input_dict:
+            input_dict["constraints"] = []
+        
+        input_dict["constraints"].append({
+            "pocket": pocket_constraints
+        })
+    else:
+        print(f"Automatic pocket scanning disabled for {datapoint_id} - running without constraints")
 
     # Please note:
     # `protein` is a single-chain target protein sequence with id A
     # `ligands` contains a single small molecule ligand object with unknown binding sites
     # The binding site prediction results have been used to add pocket constraints to input_dict
 
-    # Example: predict 5 structures
-    cli_args = ["--diffusion_samples", "5"]
+    cli_args = ["--diffusion_samples", "30", "--sampling_steps", "300", "--use_potentials"]
     return [(input_dict, cli_args)]
 
 def post_process_protein_complex(datapoint: Datapoint, input_dicts: List[dict[str, Any]], cli_args_list: List[list[str]], prediction_dirs: List[Path]) -> List[Path]:
@@ -248,6 +254,8 @@ ap.add_argument("--group-id", type=str, required=False, default=None,
                 help="Group ID to set for submission directory (sets group rw access if specified)")
 ap.add_argument("--result-folder", type=Path, required=False, default=None,
                 help="Directory to save evaluation results. If set, will automatically run evaluation after predictions.")
+ap.add_argument("--use-auto-pocket-scanner", action="store_true", 
+                help="Use automatic pocket scanning (binding site prediction) to add constraints")
 
 args = ap.parse_args()
 
@@ -341,19 +349,22 @@ def _run_boltz_and_collect(datapoint) -> None:
             f.write(f"    id: {input_dict['sequences'][1]['ligand']['id']}\n")
             f.write(f"    smiles: {input_dict['sequences'][1]['ligand']['smiles']}\n")
             
-            # Write constraints
-            f.write("constraints:\n")
-            for constraint in input_dict['constraints']:
-                if 'pocket' in constraint:
-                    f.write("- pocket:\n")
-                    f.write(f"    binder: {constraint['pocket']['binder']}\n")
-                    f.write("    contacts: [")
-                    contacts = constraint['pocket']['contacts']
-                    for i, contact in enumerate(contacts):
-                        if i > 0:
-                            f.write(", ")
-                        f.write(f"[ {contact[0]}, {contact[1]} ]")
-                    f.write(" ]\n")
+            # Write constraints (if any)
+            if 'constraints' in input_dict and input_dict['constraints']:
+                f.write("constraints:\n")
+                for constraint in input_dict['constraints']:
+                    if 'pocket' in constraint:
+                        f.write("- pocket:\n")
+                        f.write(f"    binder: {constraint['pocket']['binder']}\n")
+                        f.write("    contacts: [")
+                        contacts = constraint['pocket']['contacts']
+                        for i, contact in enumerate(contacts):
+                            if i > 0:
+                                f.write(", ")
+                            f.write(f"[ {contact[0]}, {contact[1]} ]")
+                        f.write(" ]\n")
+                        f.write(f"    max_distance: {constraint['pocket']['max_distance']}\n")
+                        f.write(f"    force: {str(constraint['pocket']['force']).lower()}\n")
 
         # Run boltz
         cache = os.environ.get("BOLTZ_CACHE", str(Path.home() / ".boltz"))
