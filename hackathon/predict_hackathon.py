@@ -336,8 +336,8 @@ ap.add_argument("--group-id", type=str, required=False, default=None,
                 help="Group ID to set for submission directory (sets group rw access if specified)")
 ap.add_argument("--result-folder", type=Path, required=False, default=None,
                 help="Directory to save evaluation results. If set, will automatically run evaluation after predictions.")
-ap.add_argument("--use-auto-pocket-scanner", action="store_true", 
-                help="Use automatic pocket scanning (binding site prediction) to add constraints")
+ap.add_argument("--use-auto-pocket-scanner", action="store_true", default=True,
+                help="Use automatic pocket scanning (binding site prediction) to add constraints (default: True)")
 
 args = ap.parse_args()
 
