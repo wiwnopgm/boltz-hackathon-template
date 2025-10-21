@@ -63,6 +63,9 @@ RUN chown -R $USERNAME:$USERNAME /app
 
 USER $USERNAME
 
+
+## Add download step for LABind weights + models
+
 # Initialize mamba and activate the boltz environment
 SHELL ["/bin/bash", "-c"]
 RUN mamba init bash && \

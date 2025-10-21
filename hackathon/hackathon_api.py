@@ -43,4 +43,5 @@ class Datapoint:
     proteins: list[Protein]
     ligands: Optional[list[SmallMolecule]] = None  # We will only have a SINGLE ligand for the allosteric/orthosteric binding challenge
     ground_truth: Optional[dict[str, Any]] = None
+    constraints: Optional[list[dict[str, Any]]] = None  # Constraints for the prediction (e.g., negative_pocket)
 

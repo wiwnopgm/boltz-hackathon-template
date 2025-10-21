@@ -6,6 +6,13 @@ __pycache__/
 # C extensions
 *.so
 
+/output
+hackathon/contrib/example/out
+# checkpoints
+checkpoints/
+binding_output/
+runs_bechmarks
+
 # Distribution / packaging
 .Python
 build/
@@ -167,8 +174,14 @@ hackathon_data/
 # Boltz prediction outputs
 #   All result files generated from a boltz prediction call
 boltz_results_*/
-my_predictions/
 tmp/
-my_results/
+test_results/
 asos_public_evaluation/
 abag_public_evaluation/
+
+test_negative_pocket_v2_results/
+test_negative_pocket_v3_results/
+test_negative_pocket_v4_results/
+test_negative_pocket_v5_results/
+
+test_pipeline_results/
