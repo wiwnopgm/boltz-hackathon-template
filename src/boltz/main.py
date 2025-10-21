@@ -1067,7 +1067,7 @@ def predict(  # noqa: C901, PLR0915, PLR0912
     msa_server_password: Optional[str] = None,
     api_key_header: Optional[str] = None,
     api_key_value: Optional[str] = None,
-    use_potentials: bool = False,
+    use_potentials: bool = True,
     model: Literal["boltz1", "boltz2"] = "boltz2",
     method: Optional[str] = None,
     affinity_mw_correction: Optional[bool] = False,
@@ -1309,6 +1309,7 @@ def predict(  # noqa: C901, PLR0915, PLR0912
         steering_args = BoltzSteeringParams()
         steering_args.fk_steering = use_potentials
         steering_args.physical_guidance_update = use_potentials
+        steering_args.contact_guidance_update = use_potentials  # Required for negative_pocket constraints
 
         model_cls = Boltz2 if model == "boltz2" else Boltz1
         model_module = model_cls.load_from_checkpoint(

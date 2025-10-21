@@ -668,26 +668,37 @@ class ContactPotentital(FlatBottomPotential, DistancePotential):
         )
         
 class RepulsionContactPotential(FlatBottomPotential, DistancePotential):
-    """Repulsion contact potential that creates true repulsion (opposite of ContactPotential).
+    """Repulsion contact potential that pushes atoms apart (opposite of ContactPotential).
     
     ContactPotential (attraction):
-        - upper_bounds only: penalty when distance > threshold
-        - dEnergy > 0 → pushes to decrease distance (attract)
+        - Configuration: lower_bounds=-inf, upper_bounds=threshold, negation_mask=True
+        - No swapping occurs (negation_mask=True prevents it)
+        - Penalty when distance > threshold (too far)
+        - dEnergy/ddistance = +k (positive derivative, FlatBottomPotential line 276-278)
+        - Coordinate gradient = +k * r_hat (points away from other atom)
+        - In guidance_update -= gradient, atoms move TOGETHER (attraction) ✓
     
     RepulsionContactPotential (repulsion):
-        - lower_bounds only: penalty when distance < threshold  
-        - dEnergy > 0 → pushes to increase distance (repel)
-        - Negates gradient to flip direction from FlatBottomPotential's default
+        - Configuration: lower_bounds=threshold, upper_bounds=+inf, negation_mask=True
+        - No swapping occurs (negation_mask=True prevents it)
+        - Penalty when distance < threshold (too close)
+        - dEnergy/ddistance = -k (negative derivative, FlatBottomPotential line 273-275)
+        - Coordinate gradient = -k * r_hat (points toward other atom)
+        - In guidance_update -= gradient, atoms move APART (repulsion) ✓
+    
+    The negation_mask=True in both cases ensures no bound swapping occurs in FlatBottomPotential.
     """
     
     def compute_args(self, feats, parameters):
         index = feats["repulsion_contact_pair_index"][0]
         union_index = feats["repulsion_contact_union_index"][0]
         negation_mask = feats["repulsion_contact_negation_mask"][0]
-        # Use lower_bounds: penalty when too close
+        
+        # Use lower_bounds to penalize atoms being too close (distance < threshold)
         lower_bounds = feats["repulsion_contact_thresholds"][0].clone()
         upper_bounds = None
         k = torch.ones_like(lower_bounds)
+
         return (
             index,
             (k, lower_bounds, upper_bounds),
@@ -695,31 +706,6 @@ class RepulsionContactPotential(FlatBottomPotential, DistancePotential):
             None,
             (negation_mask, union_index),
         )
-    
-    def compute_function(
-        self,
-        value,
-        k,
-        lower_bounds,
-        upper_bounds,
-        negation_mask=None,
-        compute_derivative=False,
-    ):
-        # Call parent to get standard flat-bottom potential
-        result = super().compute_function(
-            value, k, lower_bounds, upper_bounds, negation_mask, compute_derivative
-        )
-        
-        # Negate gradient only to flip repulsion direction
-        # Energy stays positive (penalty) but gradient is inverted
-        # When distance < threshold:
-        #   - energy = k * (threshold - distance) > 0 (penalty)
-        #   - dEnergy = +k (instead of -k) → pushes to INCREASE distance
-        if compute_derivative:
-            energy, dEnergy = result
-            return energy, -dEnergy  # Negate gradient only
-        else:
-            return result  # Keep energy positive for penalty
 
 def get_potentials(steering_args, boltz2=False):
     potentials = []
@@ -838,18 +824,19 @@ def get_potentials(steering_args, boltz2=False):
                 ),
                 RepulsionContactPotential(
                     parameters={
-                        "guidance_interval": 4,
+                        "guidance_interval": 1,  # Apply more frequently
                         "guidance_weight": (
                             PiecewiseStepFunction(
-                                thresholds=[0.25, 0.75], values=[0.0, 0.5, 1.0]
+                                # Reverse schedule: strong early (t=1.0), weaker late (t=0.0)
+                                thresholds=[0.25, 0.75], values=[5.0, 10.0, 15.0]
                             )
                             if steering_args["contact_guidance_update"]
                             else 0.0
                         ),
                         "resampling_weight": 1.0,
                         "union_lambda": ExponentialInterpolation(
-                            start=8.0, end=0.0, alpha=-2.0
-                        ),
+                            start=0.0, end=8.0, alpha=-2.0
+                        )
                     }
                 ),
             ]

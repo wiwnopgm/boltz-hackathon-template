@@ -171,3 +171,7 @@ tmp/
 test_results/
 asos_public_evaluation/
 abag_public_evaluation/
+
+test_negative_pocket_v2_results/
+test_negative_pocket_v3_results/
+test_negative_pocket_v4_results/

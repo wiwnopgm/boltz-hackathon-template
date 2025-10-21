@@ -2198,6 +2198,8 @@ def process_repulsion_contact_feature_constraints(
                 ).T
                 pair_index.append(atom_idx_pairs)
                 union_index.append(torch.full((atom_idx_pairs.shape[1],), union_idx))
+                # For repulsion: set negation_mask=True to prevent swapping bounds
+                # This ensures lower_bounds stays as threshold, creating penalty when distance < threshold
                 negation_mask.append(
                     torch.ones((atom_idx_pairs.shape[1],), dtype=torch.bool)
                 )
