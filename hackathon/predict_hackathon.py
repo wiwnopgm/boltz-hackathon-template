@@ -1,19 +1,91 @@
 # predict_hackathon.py
 import argparse
 import json
+import glob
 import os
 import shutil
 import subprocess
+from collections import defaultdict
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any, List, Optional
 
+import boltz
+from boltz.main import predict
 import yaml
 from hackathon_api import Datapoint, Protein, SmallMolecule
 
 # ---------------------------------------------------------------------------
 # ---- Participants should modify these four functions ----------------------
 # ---------------------------------------------------------------------------
+
+def center_with_character(text: str, width: int = 40, char: str = "=") -> str:
+    return text.center(width, char)
+
+
+def predict_3d_structure(datapoint_id: str, input_dict: dict, diffusion_samples: int = 5) -> Path:
+    input_dir = Path("intermediate_pdb_files") / "input"
+    input_dir.mkdir(parents=True, exist_ok=True)
+
+    # Prepare YAML input file for boltz
+    yaml_path = input_dir / f"{datapoint_id}_config.yaml"
+    with open(yaml_path, "w") as f:
+        yaml.safe_dump(input_dict, f, sort_keys=False)
+
+    # Run boltz
+    out_dir = Path("intermediate_pdb_files") / "output"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    cache = os.environ.get("BOLTZ_CACHE", str(Path.home() / ".boltz"))
+    fixed = [
+        "boltz", "predict", str(yaml_path),
+        "--devices", "1",
+        "--out_dir", str(out_dir),
+        "--cache", cache,
+        "--no_kernels",
+        "--output_format", "pdb",
+    ]
+    cli_args = ["--diffusion_samples", f"{diffusion_samples}"]
+    cmd = fixed + cli_args
+    print(f"Running for {datapoint_id}:", " ".join(cmd), flush=True)
+    subprocess.run(cmd, check=True)
+
+    # Get pdb file with the best score
+    pred_subfolder = out_dir / f"boltz_results_{datapoint_id}_config" / "predictions" / f"{datapoint_id}_config"
+    sample_id_max = 0
+    confidence_max = -1
+    for sample_id in range(diffusion_samples):
+        confidence_filename = pred_subfolder / f"confidence_{datapoint_id}_config_model_{sample_id}.json"
+        with open(confidence_filename, "r") as fin:
+            data = json.load(fin)
+            confidence = data["confidence_score"]
+            if confidence > confidence_max:
+                sample_id_max = sample_id
+
+    pdb_file_result = pred_subfolder / f"{datapoint_id}_config_model_{sample_id_max}.pdb"
+    return pdb_file_result
+
+
+def find_pockets(pdb_file: Path, pockets_limit: int = 20):
+    # Run pocket finding
+    cmd = [
+        "fpocket", "-f", str(pdb_file),
+    ]
+    print(f"Running pocket prediction for {pdb_file}:", " ".join(cmd), flush=True)
+    subprocess.run(cmd, check=True)
+
+    # Get pockets residues
+    pred_subfolder = pdb_file.parent / f"{pdb_file.stem}_out" / "pockets"
+
+    residue_pockets = defaultdict(int)
+    for pocket_file in glob.glob(f"{pred_subfolder}/pocket*_atm.pdb"):
+        with open(pocket_file) as f:
+            for line in f:
+                if line.startswith("ATOM"):
+                    chain, resnum = line.split()[4:6]
+                    residue_pockets[(chain, resnum)] += 1
+
+    return list(residue_pockets.keys())[:pockets_limit]
+
 
 def prepare_protein_complex(datapoint_id: str, proteins: List[Protein], input_dict: dict, msa_dir: Optional[Path] = None) -> List[tuple[dict, List[str]]]:
     """
@@ -43,6 +115,14 @@ def prepare_protein_complex(datapoint_id: str, proteins: List[Protein], input_di
     # ```
     #
     # will add contact constraints to the input_dict
+
+    print(center_with_character(text="prepare_protein_complex:predict_3d_structure", width=60))
+    pdb_file = predict_3d_structure(datapoint_id, input_dict)
+    print(pdb_file)
+
+    print(center_with_character(text="prepare_protein_complex:find_pockets", width=60))
+    pockets = find_pockets(pdb_file)
+    print(pockets)
 
     # Example: predict 5 structures
     cli_args = ["--diffusion_samples", "5"]
