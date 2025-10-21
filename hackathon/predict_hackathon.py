@@ -1,15 +1,29 @@
 # predict_hackathon.py
+import yaml
+import sys
 import argparse
 import json
+import glob
 import os
 import shutil
 import subprocess
 import math
+from collections import defaultdict
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 import numpy as np
+try:
+    from hackathon.contrib import predict_binding_sites
+except ImportError:
+    # Fallback for when running as script
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).parent / 'contrib'))
+    from simple_binding_predictor import predict_binding_sites
+import boltz
+from boltz.main import predict
 import yaml
 from hackathon_api import Datapoint, Protein, SmallMolecule
 from Bio.PDB import PDBParser, Superimposer, NeighborSearch
@@ -450,8 +464,134 @@ def is_allosteric_binder(metrics: Dict[str, List[float]], ligand_smiles: Optiona
     return is_allosteric, detection_stats
 
 # ---------------------------------------------------------------------------
+# ---- Helper functions for binding site analysis --------------------------
+# ---------------------------------------------------------------------------
+
+def get_top_binding_sites(binding_probs, top_n, threshold=0.5):
+    """
+    Extract the top N binding site positions based on binding probabilities.
+    
+    Args:
+        binding_probs: List of binding probabilities for each residue
+        top_n: Number of top predictions to return
+        threshold: Minimum binding probability threshold
+        
+    Returns:
+        List of residue indices (1-based) with highest binding probabilities
+    """
+    import numpy as np
+    
+    # Convert to numpy array for easier manipulation
+    probs = np.array(binding_probs)
+    
+    # Filter by threshold
+    valid_indices = np.where(probs >= threshold)[0]
+    
+    if len(valid_indices) == 0:
+        # If no residues meet threshold, get top N regardless
+        top_indices = np.argsort(probs)[-top_n:][::-1]
+    else:
+        # Get top N from valid indices
+        valid_probs = probs[valid_indices]
+        top_valid_indices = np.argsort(valid_probs)[-min(top_n, len(valid_indices)):][::-1]
+        top_indices = valid_indices[top_valid_indices]
+    
+    # Convert to 1-based indexing (residue numbers start from 1)
+    return (top_indices + 1).tolist()
+
+def create_pocket_constraints(residue_indices, protein_chain_id, ligand_id="B"):
+    """
+    Create pocket constraints for the input dictionary.
+    
+    Args:
+        residue_indices: List of residue indices (1-based)
+        protein_chain_id: Protein chain identifier (e.g., 'A')
+        ligand_id: Ligand identifier (default: 'B')
+        
+    Returns:
+        Dictionary with pocket constraint configuration
+    """
+    # Create contacts list with protein chain and residue index
+    contacts = [[protein_chain_id, idx] for idx in residue_indices]
+    
+    return {
+        "binder": ligand_id,
+        "contacts": contacts,
+        "max_distance": 2.0,
+        "force": True
+    }
+
+# ---------------------------------------------------------------------------
 # ---- Participants should modify these four functions ----------------------
 # ---------------------------------------------------------------------------
+
+def center_with_character(text: str, width: int = 40, char: str = "=") -> str:
+    return text.center(width, char)
+
+
+def predict_3d_structure(datapoint_id: str, input_dict: dict, diffusion_samples: int = 5) -> Path:
+    input_dir = Path("intermediate_pdb_files") / "input"
+    input_dir.mkdir(parents=True, exist_ok=True)
+
+    # Prepare YAML input file for boltz
+    yaml_path = input_dir / f"{datapoint_id}_config.yaml"
+    with open(yaml_path, "w") as f:
+        yaml.safe_dump(input_dict, f, sort_keys=False)
+
+    # Run boltz
+    out_dir = Path("intermediate_pdb_files") / "output"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    cache = os.environ.get("BOLTZ_CACHE", str(Path.home() / ".boltz"))
+    fixed = [
+        "boltz", "predict", str(yaml_path),
+        "--devices", "1",
+        "--out_dir", str(out_dir),
+        "--cache", cache,
+        "--no_kernels",
+        "--output_format", "pdb",
+    ]
+    cli_args = ["--diffusion_samples", f"{diffusion_samples}"]
+    cmd = fixed + cli_args
+    print(f"Running for {datapoint_id}:", " ".join(cmd), flush=True)
+    subprocess.run(cmd, check=True)
+
+    # Get pdb file with the best score
+    pred_subfolder = out_dir / f"boltz_results_{datapoint_id}_config" / "predictions" / f"{datapoint_id}_config"
+    sample_id_max = 0
+    confidence_max = -1
+    for sample_id in range(diffusion_samples):
+        confidence_filename = pred_subfolder / f"confidence_{datapoint_id}_config_model_{sample_id}.json"
+        with open(confidence_filename, "r") as fin:
+            data = json.load(fin)
+            confidence = data["confidence_score"]
+            if confidence > confidence_max:
+                sample_id_max = sample_id
+
+    pdb_file_result = pred_subfolder / f"{datapoint_id}_config_model_{sample_id_max}.pdb"
+    return pdb_file_result
+
+
+def find_pockets(pdb_file: Path, pockets_limit: int = 20):
+    # Run pocket finding
+    cmd = [
+        "fpocket", "-f", str(pdb_file),
+    ]
+    print(f"Running pocket prediction for {pdb_file}:", " ".join(cmd), flush=True)
+    subprocess.run(cmd, check=True)
+
+    # Get pockets residues
+    pred_subfolder = pdb_file.parent / f"{pdb_file.stem}_out" / "pockets"
+
+    residue_pockets = defaultdict(int)
+    for pocket_file in glob.glob(f"{pred_subfolder}/pocket*_atm.pdb"):
+        with open(pocket_file) as f:
+            for line in f:
+                if line.startswith("ATOM"):
+                    chain, resnum = line.split()[4:6]
+                    residue_pockets[(chain, resnum)] += 1
+
+    return list(residue_pockets.keys())[:pockets_limit]
+
 
 def prepare_protein_complex(datapoint_id: str, proteins: List[Protein], input_dict: dict, msa_dir: Optional[Path] = None) -> List[tuple[dict, List[str]]]:
     """
@@ -482,6 +622,14 @@ def prepare_protein_complex(datapoint_id: str, proteins: List[Protein], input_di
     #
     # will add contact constraints to the input_dict
 
+    print(center_with_character(text="prepare_protein_complex:predict_3d_structure", width=60))
+    pdb_file = predict_3d_structure(datapoint_id, input_dict)
+    print(pdb_file)
+
+    print(center_with_character(text="prepare_protein_complex:find_pockets", width=60))
+    pockets = find_pockets(pdb_file)
+    print(pockets)
+
     # Example: predict 5 structures
     cli_args = ["--diffusion_samples", "5", "--use_potentials"]
     return [(input_dict, cli_args)]
@@ -500,43 +648,56 @@ def prepare_protein_ligand(datapoint_id: str, protein: Protein, ligands: list[Sm
     Returns:
         List of tuples of (final input dict that will get exported as YAML, list of CLI args). Each tuple represents a separate configuration to run.
     """
+    
+
+    # Check if automatic pocket scanning is enabled
+    if args.use_auto_pocket_scanner:
+        # Extract protein sequence and ligand SMILES
+        protein_sequence = protein.sequence
+        ligand_smiles = ligands[0].smiles if ligands else ""
+        
+        # Run binding site prediction
+        binding_results = predict_binding_sites(
+            protein_sequence=protein_sequence,
+            smiles=ligand_smiles,
+            output_dir=f"binding_output/{datapoint_id}/",
+            use_boltz=False,
+        )
+        
+        print(f"Binding site prediction completed for {datapoint_id}")
+        print(f"Found {len(binding_results['binding_probabilities'])} residues with binding probabilities")
+        print(f"Results saved to: {binding_results['result_csv_path']}")
+        
+        # Extract top N binding site predictions and create pocket constraints
+        # You can customize these parameters:
+        top_n_predictions = 5 # Number of top predictions to use
+        binding_threshold = 0.8  # Minimum binding probability threshold
+        
+        # Get top binding site positions
+        binding_probs = binding_results['binding_probabilities']
+        top_indices = get_top_binding_sites(binding_probs, top_n_predictions, binding_threshold)
+        
+        print(f"Selected {len(top_indices)} binding site positions: {top_indices}")
+        
+        # Create pocket constraints for the input dictionary
+        pocket_constraints = create_pocket_constraints(top_indices, protein.id, ligands[0].id if ligands else "B")
+        
+        # Add pocket constraints to input_dict
+        if "constraints" not in input_dict:
+            input_dict["constraints"] = []
+        
+        input_dict["constraints"].append({
+            "pocket": pocket_constraints
+        })
+    else:
+        print(f"Automatic pocket scanning disabled for {datapoint_id} - running without constraints")
+
     # Please note:
     # `protein` is a single-chain target protein sequence with id A
     # `ligands` contains a single small molecule ligand object with unknown binding sites
-    # 
-    # If allosteric binding is detected (is_allosteric=True), input_dict will already contain
-    # a negative_pocket constraint in the format:
-    # ```
-    # "constraints": [{
-    #     "negative_pocket": {
-    #         "binder": "B",
-    #         "contacts": [["A", 69], ["A", 70], ...],
-    #         "min_distance": 10.0,
-    #         "force": True
-    #     }
-    # }]
-    # ```
-    #
-    # You can modify or add additional constraints as needed, e.g.:
-    # ```
-    # if "constraints" not in input_dict:
-    #     input_dict["constraints"] = []
-    # 
-    # # Add a contact constraint
-    # input_dict["constraints"].append({
-    #     "contact": {
-    #         "token1": ["A", 100],  # Protein residue
-    #         "token2": ["B", 1]      # Ligand
-    #     }
-    # })
-    # ```
+    # The binding site prediction results have been used to add pocket constraints to input_dict
 
-    # Example: predict 5 structures
-    cli_args = ["--diffusion_samples", "5", "--use_potentials"]
-    
-    # For allosteric binders, negative_pocket constraint is already added in input_dict
-    # You can add additional modifications here if needed
-    
+    cli_args = ["--diffusion_samples", "10", "--sampling_steps", "300", "--use_potentials"]
     return [(input_dict, cli_args)]
 
 def post_process_protein_complex(datapoint: Datapoint, input_dicts: List[dict[str, Any]], cli_args_list: List[list[str]], prediction_dirs: List[Path]) -> List[Path]:
@@ -918,6 +1079,8 @@ ap.add_argument("--group-id", type=str, required=False, default=None,
                 help="Group ID to set for submission directory (sets group rw access if specified)")
 ap.add_argument("--result-folder", type=Path, required=False, default=None,
                 help="Directory to save evaluation results. If set, will automatically run evaluation after predictions.")
+ap.add_argument("--use-auto-pocket-scanner", action="store_true", default=True,
+                help="Use automatic pocket scanning (binding site prediction) to add constraints (default: True)")
 
 args = ap.parse_args()
 
@@ -1179,6 +1342,8 @@ def _run_boltz_and_collect(datapoint) -> None:
     for config_idx, (input_dict, cli_args) in enumerate(configs):
         # Write input YAML with config index suffix
         yaml_path = input_dir / f"{datapoint.datapoint_id}_config_{config_idx}.yaml"
+        
+        # Write YAML with custom formatting for contacts
         with open(yaml_path, "w") as f:
             # Custom YAML formatting to keep contacts as inline lists
             class FlowListDumper(yaml.SafeDumper):
@@ -1194,6 +1359,36 @@ def _run_boltz_and_collect(datapoint) -> None:
             FlowListDumper.add_representer(list, represent_list)
             
             yaml.dump(input_dict, f, Dumper=FlowListDumper, sort_keys=False, default_flow_style=False)
+            f.write("version: 1\n")
+            f.write("sequences:\n")
+            
+            # Write protein sequence
+            f.write("- protein:\n")
+            f.write(f"    id: {input_dict['sequences'][0]['protein']['id']}\n")
+            f.write(f"    sequence: {input_dict['sequences'][0]['protein']['sequence']}\n")
+            f.write(f"    msa: {input_dict['sequences'][0]['protein']['msa']}\n")
+            
+            # Write ligand sequence
+            f.write("- ligand:\n")
+            f.write(f"    id: {input_dict['sequences'][1]['ligand']['id']}\n")
+            f.write(f"    smiles: {input_dict['sequences'][1]['ligand']['smiles']}\n")
+            
+            # Write constraints (if any)
+            if 'constraints' in input_dict and input_dict['constraints']:
+                f.write("constraints:\n")
+                for constraint in input_dict['constraints']:
+                    if 'pocket' in constraint:
+                        f.write("- pocket:\n")
+                        f.write(f"    binder: {constraint['pocket']['binder']}\n")
+                        f.write("    contacts: [")
+                        contacts = constraint['pocket']['contacts']
+                        for i, contact in enumerate(contacts):
+                            if i > 0:
+                                f.write(", ")
+                            f.write(f"[ {contact[0]}, {contact[1]} ]")
+                        f.write(" ]\n")
+                        f.write(f"    max_distance: {constraint['pocket']['max_distance']}\n")
+                        f.write(f"    force: {str(constraint['pocket']['force']).lower()}\n")
 
         # Run boltz
         cache = os.environ.get("BOLTZ_CACHE", str(Path.home() / ".boltz"))

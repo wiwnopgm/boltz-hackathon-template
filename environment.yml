@@ -5,3 +5,8 @@ dependencies:
   - python=3.11
   - pip
   - pymol-open-source
+  - transformers=4.39.3=pyhd8ed1ab_0
+  - pip:
+    - lxml==5.2.1
+    - periodictable==1.7.0
+    - accelerate

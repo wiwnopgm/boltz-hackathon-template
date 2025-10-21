@@ -6,6 +6,13 @@ __pycache__/
 # C extensions
 *.so
 
+/output
+hackathon/contrib/example/out
+# checkpoints
+checkpoints/
+binding_output/
+runs_bechmarks
+
 # Distribution / packaging
 .Python
 build/
