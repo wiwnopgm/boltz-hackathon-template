@@ -56,7 +56,15 @@ LIGAND_IPTM_STD_THRESHOLD = 0.01
 # Ligand similarity threshold for allosteric detection
 LIGAND_SIMILARITY_THRESHOLD = 0.80  # 80% Tanimoto similarity
 
-# Cache for reference allosteric ligands
+# Binding site prediction parameters
+TOP_N_BINDING_PREDICTIONS = 15  # Number of top binding site predictions to use
+BINDING_PROBABILITY_THRESHOLD = 0.7  # Minimum binding probability threshold
+
+# Constraint distance parameters
+NEGATIVE_POCKET_MIN_DISTANCE = 10.0  # Minimum distance (Å) for negative_pocket constraint (allosteric)
+POCKET_MAX_DISTANCE = 4.0  # Maximum distance (Å) for pocket constraint
+
+2# Cache for reference allosteric ligands
 _REFERENCE_ALLOSTERIC_LIGANDS = None
 
 def _load_structure(path: Path):
@@ -397,6 +405,7 @@ def extract_confidence_metrics(prediction_output_dir: Path, datapoint_id: str) -
     
     return metrics
 
+
 def is_allosteric_binder(metrics: Dict[str, List[float]], ligand_smiles: Optional[str] = None, reference_dataset_path: Optional[Path] = None) -> Tuple[bool, Dict[str, Any]]:
     """
     Determine if binding is allosteric based on:
@@ -517,7 +526,7 @@ def create_pocket_constraints(residue_indices, protein_chain_id, ligand_id="B"):
     return {
         "binder": ligand_id,
         "contacts": contacts,
-        "max_distance": 2.0,
+        "max_distance": POCKET_MAX_DISTANCE,
         "force": True
     }
 
@@ -634,7 +643,7 @@ def prepare_protein_complex(datapoint_id: str, proteins: List[Protein], input_di
     cli_args = ["--diffusion_samples", "5", "--use_potentials"]
     return [(input_dict, cli_args)]
 
-def prepare_protein_ligand(datapoint_id: str, protein: Protein, ligands: list[SmallMolecule], input_dict: dict, msa_dir: Optional[Path] = None, is_allosteric: bool = False) -> List[tuple[dict, List[str]]]:
+def prepare_protein_ligand(datapoint_id: str, protein: Protein, ligands: list[SmallMolecule], input_dict: dict, msa_dir: Optional[Path] = None, pocket_residues: Optional[Set[Tuple[str, str, int]]] = None, is_allosteric: bool = False) -> List[tuple[dict, List[str]]]:
     """
     Prepare input dict and CLI args for a protein-ligand prediction.
     You can return multiple configurations to run by returning a list of (input_dict, cli_args) tuples.
@@ -642,13 +651,36 @@ def prepare_protein_ligand(datapoint_id: str, protein: Protein, ligands: list[Sm
         datapoint_id: The unique identifier for this datapoint
         protein: The protein sequence
         ligands: A list of a single small molecule ligand object 
-        input_dict: Prefilled input dict (may already contain negative_pocket constraint if allosteric)
+        input_dict: Prefilled input dict
         msa_dir: Directory containing MSA files (for computing relative paths)
+        pocket_residues: Optional set of orthosteric pocket residues (chain_id, resname, residue_number)
         is_allosteric: Whether the binding is detected as allosteric based on variance
     Returns:
         List of tuples of (final input dict that will get exported as YAML, list of CLI args). Each tuple represents a separate configuration to run.
     """
     
+    # Add negative_pocket constraint from identified orthosteric pocket residues
+    # Only add for allosteric binders to force binding away from orthosteric pocket
+    if pocket_residues and ligands and is_allosteric:
+        ligand_id = ligands[0].id  # Typically "B" for protein-ligand
+        contacts = [[chain, resi] for chain, resn, resi in sorted(pocket_residues)]
+        
+        negative_pocket_constraint = {
+            "negative_pocket": {
+                "binder": ligand_id,
+                "contacts": contacts,
+                "min_distance": NEGATIVE_POCKET_MIN_DISTANCE,
+                "force": True
+            }
+        }
+        
+        # Add to constraints list
+        if "constraints" not in input_dict:
+            input_dict["constraints"] = []
+        
+        input_dict["constraints"].append(negative_pocket_constraint)
+        
+        print(f"  Added negative_pocket constraint for ALLOSTERIC binding with {len(contacts)} residues (min_distance={NEGATIVE_POCKET_MIN_DISTANCE} Å)")
 
     # Check if automatic pocket scanning is enabled
     if args.use_auto_pocket_scanner:
@@ -669,26 +701,40 @@ def prepare_protein_ligand(datapoint_id: str, protein: Protein, ligands: list[Sm
         print(f"Results saved to: {binding_results['result_csv_path']}")
         
         # Extract top N binding site predictions and create pocket constraints
-        # You can customize these parameters:
-        top_n_predictions = 5 # Number of top predictions to use
-        binding_threshold = 0.8  # Minimum binding probability threshold
-        
         # Get top binding site positions
         binding_probs = binding_results['binding_probabilities']
-        top_indices = get_top_binding_sites(binding_probs, top_n_predictions, binding_threshold)
+        top_indices = get_top_binding_sites(binding_probs, TOP_N_BINDING_PREDICTIONS, BINDING_PROBABILITY_THRESHOLD)
         
-        print(f"Selected {len(top_indices)} binding site positions: {top_indices}")
+        print(f"Selected {len(top_indices)} binding site positions (before filtering): {top_indices}")
+        
+        # For allosteric binders, exclude residues that overlap with orthosteric pocket
+        if is_allosteric and pocket_residues:
+            # Extract residue numbers from orthosteric pocket
+            orthosteric_residue_numbers = {resi for chain, resn, resi in pocket_residues}
+            
+            # Filter out orthosteric residues from predicted binding sites
+            filtered_indices = [idx for idx in top_indices if idx not in orthosteric_residue_numbers]
+            
+            print(f"  Filtering out {len(orthosteric_residue_numbers)} orthosteric pocket residues for ALLOSTERIC binder")
+            print(f"  Removed residues: {sorted(set(top_indices) - set(filtered_indices))}")
+            print(f"  Remaining allosteric binding site positions: {len(filtered_indices)} - {filtered_indices}")
+            
+            top_indices = filtered_indices
         
         # Create pocket constraints for the input dictionary
-        pocket_constraints = create_pocket_constraints(top_indices, protein.id, ligands[0].id if ligands else "B")
-        
-        # Add pocket constraints to input_dict
-        if "constraints" not in input_dict:
-            input_dict["constraints"] = []
-        
-        input_dict["constraints"].append({
-            "pocket": pocket_constraints
-        })
+        if len(top_indices) > 0:
+            pocket_constraints = create_pocket_constraints(top_indices, protein.id, ligands[0].id if ligands else "B")
+            
+            # Add pocket constraints to input_dict
+            if "constraints" not in input_dict:
+                input_dict["constraints"] = []
+            
+            input_dict["constraints"].append({
+                "pocket": pocket_constraints
+            })
+            print(f"Added pocket constraint with {len(top_indices)} residues")
+        else:
+            print(f"WARNING: No binding site residues remaining after filtering. Skipping pocket constraint.")
     else:
         print(f"Automatic pocket scanning disabled for {datapoint_id} - running without constraints")
 
@@ -1084,7 +1130,7 @@ ap.add_argument("--use-auto-pocket-scanner", action="store_true", default=True,
 
 args = ap.parse_args()
 
-def _prefill_input_dict(datapoint_id: str, proteins: Iterable[Protein], ligands: Optional[list[SmallMolecule]] = None, msa_dir: Optional[Path] = None, constraints: Optional[list] = None, pocket_residues: Optional[Set[Tuple[str, str, int]]] = None, is_allosteric: bool = False) -> dict:
+def _prefill_input_dict(datapoint_id: str, proteins: Iterable[Protein], ligands: Optional[list[SmallMolecule]] = None, msa_dir: Optional[Path] = None, constraints: Optional[list] = None) -> dict:
     """
     Prepare input dict for Boltz YAML.
     
@@ -1094,9 +1140,6 @@ def _prefill_input_dict(datapoint_id: str, proteins: Iterable[Protein], ligands:
         ligands: Optional list of small molecule ligands
         msa_dir: Directory containing MSA files
         constraints: Optional list of constraint dictionaries
-        pocket_residues: Optional set of orthosteric pocket residues (chain_id, resname, residue_number)
-                        Will be added as negative_pocket constraint if is_allosteric is True
-        is_allosteric: If True, add negative_pocket constraint to avoid orthosteric pocket
     
     Returns:
         Dictionary ready for YAML export
@@ -1139,30 +1182,9 @@ def _prefill_input_dict(datapoint_id: str, proteins: Iterable[Protein], ligands:
         "sequences": seqs,
     }
     
-    # Start with existing constraints or empty list
-    all_constraints = list(constraints) if constraints else []
-    
-    # Add negative_pocket constraint from identified orthosteric pocket residues
-    # Only add for allosteric binders to force binding away from orthosteric pocket
-    if pocket_residues and ligands and is_allosteric:
-        ligand_id = ligands[0].id  # Typically "B" for protein-ligand
-        contacts = [[chain, resi] for chain, resn, resi in sorted(pocket_residues)]
-        
-        negative_pocket_constraint = {
-            "negative_pocket": {
-                "binder": ligand_id,
-                "contacts": contacts,
-                "min_distance": 10.0,
-                "force": True
-            }
-        }
-        all_constraints.append(negative_pocket_constraint)
-        
-        print(f"  Added negative_pocket constraint for ALLOSTERIC binding with {len(contacts)} residues (min_distance=10.0 Å)")
-    
-    # Add all constraints to the document
-    if all_constraints:
-        doc["constraints"] = all_constraints
+    # Add constraints if provided
+    if constraints:
+        doc["constraints"] = list(constraints)
     
     return doc
 
@@ -1313,21 +1335,18 @@ def _run_boltz_and_collect(datapoint) -> None:
         print(f"{'='*80}\n")
 
     # Prepare input dict and CLI args for final predictions
-    # Pass pocket_residues and is_allosteric flag to _prefill_input_dict
     base_input_dict = _prefill_input_dict(
         datapoint.datapoint_id, 
         datapoint.proteins, 
         datapoint.ligands, 
         args.msa_dir, 
-        datapoint.constraints,
-        pocket_residues=pocket_residues,  # Pass identified pocket residues
-        is_allosteric=is_allosteric  # Pass allosteric detection flag
+        datapoint.constraints
     )
 
     if datapoint.task_type == "protein_complex":
         configs = prepare_protein_complex(datapoint.datapoint_id, datapoint.proteins, base_input_dict, args.msa_dir)
     elif datapoint.task_type == "protein_ligand":
-        configs = prepare_protein_ligand(datapoint.datapoint_id, datapoint.proteins[0], datapoint.ligands, base_input_dict, args.msa_dir, is_allosteric=is_allosteric)
+        configs = prepare_protein_ligand(datapoint.datapoint_id, datapoint.proteins[0], datapoint.ligands, base_input_dict, args.msa_dir, pocket_residues=pocket_residues, is_allosteric=is_allosteric)
     else:
         raise ValueError(f"Unknown task_type: {datapoint.task_type}")
 
@@ -1345,20 +1364,6 @@ def _run_boltz_and_collect(datapoint) -> None:
         
         # Write YAML with custom formatting for contacts
         with open(yaml_path, "w") as f:
-            # Custom YAML formatting to keep contacts as inline lists
-            class FlowListDumper(yaml.SafeDumper):
-                pass
-            
-            def represent_list(dumper, data):
-                # If this is a constraint contacts list (list of 2-element lists), use flow style
-                if data and isinstance(data, list) and len(data) > 0:
-                    if all(isinstance(item, list) and len(item) == 2 for item in data):
-                        return dumper.represent_sequence('tag:yaml.org,2002:seq', data, flow_style=True)
-                return dumper.represent_sequence('tag:yaml.org,2002:seq', data, flow_style=False)
-            
-            FlowListDumper.add_representer(list, represent_list)
-            
-            yaml.dump(input_dict, f, Dumper=FlowListDumper, sort_keys=False, default_flow_style=False)
             f.write("version: 1\n")
             f.write("sequences:\n")
             
@@ -1377,7 +1382,21 @@ def _run_boltz_and_collect(datapoint) -> None:
             if 'constraints' in input_dict and input_dict['constraints']:
                 f.write("constraints:\n")
                 for constraint in input_dict['constraints']:
-                    if 'pocket' in constraint:
+                    # Handle negative_pocket constraint (for allosteric binders)
+                    if 'negative_pocket' in constraint:
+                        f.write("- negative_pocket:\n")
+                        f.write(f"    binder: {constraint['negative_pocket']['binder']}\n")
+                        f.write("    contacts: [")
+                        contacts = constraint['negative_pocket']['contacts']
+                        for i, contact in enumerate(contacts):
+                            if i > 0:
+                                f.write(", ")
+                            f.write(f"[{contact[0]}, {contact[1]}]")
+                        f.write("]\n")
+                        f.write(f"    min_distance: {constraint['negative_pocket']['min_distance']}\n")
+                        f.write(f"    force: {str(constraint['negative_pocket']['force']).lower()}\n")
+                    # Handle pocket constraint (for binding site)
+                    elif 'pocket' in constraint:
                         f.write("- pocket:\n")
                         f.write(f"    binder: {constraint['pocket']['binder']}\n")
                         f.write("    contacts: [")

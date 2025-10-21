@@ -81,15 +81,47 @@ is_allosteric = is_allosteric_by_variance OR is_allosteric_by_similarity
 
 Results saved to: `{datapoint_id}/allosteric_detection.json`
 
-### Stage 3: Constrained Predictions
+### Stage 3: Automatic Pocket Scanning (Optional)
+
+**Purpose:** Use ML-based binding site prediction to guide ligand placement.
+
+**When enabled** (via `--use-auto-pocket-scanner` flag, enabled by default):
+
+1. **Predict Binding Sites**
+   ```
+   Function: predict_binding_sites()
+   ```
+   - Analyzes protein sequence and ligand SMILES
+   - Generates binding probability for each residue
+   - Returns ranked list of potential binding sites
+
+2. **Create Pocket Constraints**
+   ```
+   Function: get_top_binding_sites() → create_pocket_constraints()
+   ```
+   - Extract top N residues (default: 5) above threshold (default: 0.8)
+   - Create pocket constraint to guide ligand placement
+   
+   ```yaml
+   constraints:
+     - pocket:
+         binder: "B"  # Ligand chain ID
+         contacts: [["A", 45], ["A", 67], ...]  # Predicted binding sites
+         max_distance: 2.0  # Maximum distance in Angstroms
+         force: true
+   ```
+
+**When disabled**: No automatic pocket constraints added
+
+### Stage 4: Constrained Predictions
 
 **Purpose:** Generate final predictions with appropriate constraints based on binding type.
 
 #### For Orthosteric Binders (Default)
 
-- No special constraints added
-- May use standard contact or pocket constraints if specified
-- Ligand expected to bind near identified orthosteric pocket
+- Automatic pocket constraints added if pocket scanner enabled
+- Ligand guided to predicted binding sites
+- 10 diffusion samples with 300 sampling steps
 
 #### For Allosteric Binders
 
@@ -106,7 +138,9 @@ constraints:
 
 **Effect:** Ligand must stay ≥10 Å away from orthosteric pocket residues
 
-### Stage 4: Post-Processing & Ranking
+**Additional pocket constraints may be added** if pocket scanner is enabled
+
+### Stage 5: Post-Processing & Ranking
 
 ```
 Function: post_process_protein_ligand()
@@ -136,20 +170,37 @@ Function: post_process_protein_ligand()
 
 ## Protein-Complex Prediction Flow
 
-### Single-Stage Prediction
+### Multi-Stage Prediction with Pocket Finding
 
-**Purpose:** Predict antibody-antigen complexes.
+**Purpose:** Predict antibody-antigen complexes with enhanced pocket detection.
 
-1. **Prepare Input**
+1. **Initial 3D Structure Prediction**
+   ```
+   Function: predict_3d_structure()
+   ```
+   - Generate initial structural model for pocket analysis
+   - Use standard Boltz parameters with 5 diffusion samples
+   - Select best model based on confidence score
+
+2. **Pocket Detection**
+   ```
+   Function: find_pockets()
+   ```
+   - Run fpocket on predicted structure
+   - Identify potential binding pockets
+   - Extract pocket residues (limit: 20 residues)
+   - Returns list of (chain, resnum) tuples
+
+3. **Prepare Input**
    - 3 chains: H (heavy), L (light), A (antigen)
    - May include MSA files for each chain
-   - May include contact or other constraints
+   - May include contact or other constraints based on pocket findings
 
-2. **Run Boltz Predictions**
+4. **Run Final Boltz Predictions**
    - Generate 5 structural models (default)
-   - Use standard Boltz parameters
+   - Use `--diffusion_samples 5 --use_potentials`
 
-3. **Post-Processing**
+5. **Post-Processing**
    ```
    Function: post_process_protein_complex()
    ```
@@ -184,6 +235,24 @@ MIN_POCKET_RMSD = 4.0       # Å - minimum pocket distortion
 MIN_DISTANCE = 10.0         # Å - negative_pocket constraint distance
 ```
 
+### Automatic Pocket Scanning
+```python
+TOP_N_PREDICTIONS = 5       # Number of top binding site predictions to use
+BINDING_THRESHOLD = 0.8     # Minimum binding probability threshold
+MAX_DISTANCE = 2.0          # Å - maximum distance for pocket constraint
+POCKETS_LIMIT = 20          # Maximum number of pocket residues from fpocket
+```
+
+### Prediction Parameters
+```python
+# Protein-Ligand
+DIFFUSION_SAMPLES = 10      # Number of models to generate
+SAMPLING_STEPS = 300        # Number of sampling steps
+
+# Protein-Complex
+DIFFUSION_SAMPLES = 5       # Number of models to generate
+```
+
 ---
 
 ## Output Files
@@ -200,6 +269,14 @@ orthosteric_pocket.txt         # Identified pocket residues (protein-ligand only
 allosteric_detection.json      # Detection analysis (protein-ligand only)
 unconstrained_for_pocket/      # Unconstrained predictions (protein-ligand only)
   └── model_*.pdb
+```
+
+### Binding Site Prediction Output: `binding_output/{datapoint_id}/`
+
+```
+binding_predictions.csv        # Residue-level binding probabilities
+protein_structure.pdb          # ESMFold predicted structure (if used)
+ligand_conformer.pdb          # Generated ligand conformer
 ```
 
 ### Intermediate Files: `hackathon_intermediate/`
@@ -222,15 +299,21 @@ predictions/
 Participants can modify four key functions:
 
 ### 1. `prepare_protein_complex()`
+- Calls `predict_3d_structure()` to generate initial structure
+- Calls `find_pockets()` to identify binding pockets using fpocket
 - Modify input dictionary before prediction
-- Add constraints (contact, distance, etc.)
+- Add constraints (contact, distance, etc.) based on pocket findings
 - Specify CLI arguments for Boltz
 - Return multiple configurations to run
 
 ### 2. `prepare_protein_ligand()`
-- Same as above but for protein-ligand tasks
+- Access to automatic pocket scanning via `args.use_auto_pocket_scanner`
+- Calls `predict_binding_sites()` for ML-based pocket prediction
+- Uses `get_top_binding_sites()` and `create_pocket_constraints()`
 - Access to `is_allosteric` flag
 - Can modify/augment negative_pocket constraints
+- Can adjust TOP_N_PREDICTIONS and BINDING_THRESHOLD
+- Return multiple configurations to run
 
 ### 3. `post_process_protein_complex()`
 - Custom ranking logic for antibody-antigen predictions
@@ -240,6 +323,7 @@ Participants can modify four key functions:
 - Custom ranking logic for protein-ligand predictions
 - Access to pocket residues and allosteric information
 - Can implement custom filtering/scoring
+- Default ranking by ligand iPTM scores
 
 ---
 
@@ -265,8 +349,19 @@ python predict_hackathon.py \
   --result-folder evaluation_results
 ```
 
+### With Automatic Pocket Scanning
+```bash
+# Enabled by default, to disable:
+python predict_hackathon.py \
+  --input-json example.json \
+  --msa-dir ./msa \
+  --submission-dir submission \
+  --intermediate-dir intermediate \
+  --use-auto-pocket-scanner false
+```
+
 ### With GPU
-According to project preferences, all commands should use GPU by default [[memory:5749486]].
+According to project preferences, all commands should use GPU by default [[memory:5749486]]. The system automatically uses `--devices 1` for GPU acceleration.
 
 ---
 
@@ -277,6 +372,8 @@ According to project preferences, all commands should use GPU by default [[memor
 - **RDKit** (optional): Ligand similarity calculations
 - **NumPy**: Numerical operations
 - **PyYAML**: Configuration file handling
+- **fpocket**: Binding pocket detection tool (for protein-complex)
+- **predict_binding_sites**: ML-based binding site predictor (from hackathon.contrib)
 
 ---
 
@@ -310,6 +407,37 @@ Where:
 
 Uses Morgan fingerprints (radius=2, 2048 bits) = ECFP4 equivalent
 
+### Binding Site Prediction
+
+The automatic pocket scanner uses ML-based methods to predict binding sites:
+
+1. **Input Processing**
+   - Protein sequence and ligand SMILES are provided
+   - May use ESMFold for structure prediction if needed
+   - Generates 3D ligand conformer
+
+2. **Residue Scoring**
+   - Each residue receives a binding probability score
+   - Scores range from 0.0 (unlikely) to 1.0 (highly likely)
+
+3. **Top-N Selection**
+   ```python
+   def get_top_binding_sites(binding_probs, top_n, threshold):
+       # Filter by threshold
+       valid_indices = where(probs >= threshold)
+       
+       # Get top N from valid indices
+       top_indices = argsort(valid_probs)[-top_n:]
+       
+       # Convert to 1-based residue numbers
+       return (top_indices + 1).tolist()
+   ```
+
+4. **Constraint Generation**
+   - Creates pocket constraint with selected residues
+   - Uses max_distance = 2.0 Å
+   - Forces ligand to bind near predicted sites
+
 ---
 
 ## Troubleshooting
@@ -334,13 +462,28 @@ Uses Morgan fingerprints (radius=2, 2048 bits) = ECFP4 equivalent
 - Default path: `hackathon_data/datasets/asos_public/asos_public.jsonl`
 - Provide path via code or ensure file exists
 
+### "Binding site prediction failed"
+- Check that `predict_binding_sites` is available from `hackathon.contrib`
+- Verify protein sequence and ligand SMILES are valid
+- Check `binding_output/{datapoint_id}/` directory for error logs
+- Disable with `--use-auto-pocket-scanner false` if needed
+
+### "fpocket command not found"
+- fpocket must be installed for protein-complex predictions
+- Install via package manager or from source
+- Ensure fpocket is in system PATH
+
 ---
 
 ## Performance Notes
 
-- **Unconstrained predictions** add ~5 model runtime overhead for protein-ligand tasks
+- **Unconstrained predictions** add 5 model runtime overhead for protein-ligand tasks
 - **Allosteric detection** is fast (<1 second) once predictions complete
 - **Filtering** requires loading and aligning structures (seconds per datapoint)
+- **Binding site prediction** adds minimal overhead (~5-10 seconds per datapoint)
+- **fpocket analysis** is fast (<5 seconds) for protein-complex predictions
+- **Initial structure prediction** (for pocket finding) adds 1 complete prediction run for protein-complex
+- **Constrained predictions** with pocket constraints may take longer due to increased sampling steps (300 vs default)
 - **GPU** is strongly recommended for all predictions [[memory:5749486]]
 
 ---
@@ -350,4 +493,32 @@ Uses Morgan fingerprints (radius=2, 2048 bits) = ECFP4 equivalent
 - Variance thresholds derived from `variance_comparison_ortho_allo.csv` analysis
 - Morgan fingerprints: Rogers & Hahn, J. Chem. Inf. Model. 2010
 - Tanimoto similarity: Jaccard index for binary fingerprints
+- fpocket: Le Guilloux et al., BMC Bioinformatics 2009
+- Binding site prediction: ML-based approach from hackathon.contrib
+
+---
+
+## Summary of Key Features
+
+### Protein-Ligand Pipeline
+1. **Unconstrained Predictions** (5 models) → Pocket Identification
+2. **Allosteric Detection** via variance + ligand similarity
+3. **Automatic Pocket Scanning** (ML-based, enabled by default)
+4. **Constrained Predictions** (10 models, 300 steps)
+   - Orthosteric: pocket constraints guide ligand placement
+   - Allosteric: negative_pocket + optional pocket constraints
+5. **Post-Processing & Ranking** by ligand iPTM
+
+### Protein-Complex Pipeline
+1. **Initial Structure Prediction** (5 models) → Select best
+2. **fpocket Analysis** → Identify binding pockets
+3. **Constrained Predictions** (5 models) with pocket-informed constraints
+4. **Post-Processing** → Sort and return models
+
+### Key Innovations
+- **Automatic allosteric detection** using two independent methods
+- **ML-based binding site prediction** for improved ligand placement
+- **Structure-based pocket detection** using fpocket for protein complexes
+- **Adaptive constraint generation** based on binding type
+- **RMSD-based filtering** for allosteric predictions
 
