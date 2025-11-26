@@ -1,0 +1,140 @@
+version: 1
+
+# Configuration for 2ijm_orthosteric_atp
+# Protein-ligand complex: Chain A + ATP ligand
+
+sequences:
+  - protein:
+      id: A
+      # 281-residue sequence
+      sequence: GASTRDYEIQRERIELGRCIGEGQFGDVHQGIYMSPENPALAVAIKTCKNCTSDSVREKFLQEALTMRQFDHPHIVKLIGVITENPVWIIMELCTLGELRSFLQVRKYSLDLASLILYAYQLSTALAYLESKRFVHRDIAARNVLVSSNDCVKLGDFGLSRYMEDSTYYKASKGKLPIKWMAPESINFRRFTSASDVWMFGVCMWEILMHGVKPFQGVKNNDVIGRIENGERLPMPPNCPPTLYSLMTKCWAYDPSRRPRFTELKAQLSTILEEEKAQQEE
+
+  - ligand:
+      id: B
+      # ATP ligand
+      # Using CCD (Chemical Component Dictionary) code
+      ccd: ATP
+
+# PLIP-derived interaction constraints
+# These constraints help guide the model to reproduce experimentally observed interactions
+constraints:
+  # ILE 428 to ligand
+  - interaction:
+      token1: ['A', 14]
+      token2: ['B', 0]
+      type: hbond
+      distance: 3.05
+      tolerance: 0.5
+      force: True
+
+  # GLN 432 to ligand
+  - interaction:
+      token1: ['A', 18]
+      token2: ['B', 0]
+      type: hbond
+      distance: 1.61
+      tolerance: 0.25
+      force: True
+
+  # GLU 500 to ligand
+  - interaction:
+      token1: ['A', 86]
+      token2: ['B', 0]
+      type: hbond
+      distance: 1.82
+      tolerance: 0.25
+      force: True
+
+  # CYS 502 to ligand
+  - interaction:
+      token1: ['A', 88]
+      token2: ['B', 0]
+      type: hbond
+      distance: 2.09
+      tolerance: 0.3
+      force: True
+
+  # GLU 506 to ligand
+  - interaction:
+      token1: ['A', 92]
+      token2: ['B', 0]
+      type: hbond
+      distance: 2.98
+      tolerance: 0.3
+      force: True
+
+  # GLU 506 to ligand
+  - interaction:
+      token1: ['A', 92]
+      token2: ['B', 0]
+      type: hbond
+      distance: 3.17
+      tolerance: 0.5
+      force: True
+
+  # ASP 564 to ligand
+  - interaction:
+      token1: ['A', 150]
+      token2: ['B', 0]
+      type: hbond
+      distance: 1.75
+      tolerance: 0.25
+      force: True
+
+  # ASP 564 to ligand
+  - interaction:
+      token1: ['A', 150]
+      token2: ['B', 0]
+      type: hbond
+      distance: 1.86
+      tolerance: 0.25
+      force: True
+
+  # ASP 564 to ligand
+  - interaction:
+      token1: ['A', 150]
+      token2: ['B', 0]
+      type: hbond
+      distance: 1.74
+      tolerance: 0.25
+      force: True
+
+  # PHE 565 to ligand
+  - interaction:
+      token1: ['A', 151]
+      token2: ['B', 0]
+      type: hbond
+      distance: 3.62
+      tolerance: 0.5
+      force: True
+
+  # LYS 454 to ligand
+  - interaction:
+      token1: ['A', 40]
+      token2: ['B', 0]
+      type: hbond
+      distance: 3.44
+      tolerance: 0.5
+      force: True
+
+  # LYS 454 to ligand
+  - interaction:
+      token1: ['A', 40]
+      token2: ['B', 0]
+      type: hbond
+      distance: 4.64
+      tolerance: 0.5
+      force: True
+
+  # LYS 454 to ligand
+  - interaction:
+      token1: ['A', 40]
+      token2: ['B', 0]
+      type: hbond
+      distance: 4.14
+      tolerance: 0.5
+      force: True
+
+# Note: Residue indices are 0-based in constraints
+# Original PDB numbering starts at 414
+# Constraint indices: 0-280 (subtract 414 from PDB number and use 0-based)

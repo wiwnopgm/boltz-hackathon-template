@@ -10,6 +10,7 @@ from boltz.data.types import (
     Input,
     StructureV2,
     TokenBondV2,
+    TokenInteractionV2,
     Tokenized,
     TokenV2,
 )
@@ -369,11 +370,27 @@ def tokenize_structure(  # noqa: C901, PLR0915
             bond["type"] + 1,
         )
         token_bonds.append(token_bond)
+    
+    token_interactions = []
+    if struct.interactions is not None:
+        # Add interactions from ligands
+        for interaction in struct.interactions:
+            if interaction["atom_1"] not in atom_to_token or interaction["atom_2"] not in atom_to_token:
+                continue
+                token_interaction = (
+                atom_to_token[interaction["atom_1"]],
+                atom_to_token[interaction["atom_2"]],
+                interaction["type"],
+                interaction["distance"],
+                interaction["angle"]
+            )
+            token_interactions.append(token_interaction)
 
     token_data = np.array(token_data, dtype=TokenV2)
     token_bonds = np.array(token_bonds, dtype=TokenBondV2)
+    token_interactions = np.array(token_interactions, dtype=TokenInteractionV2)
 
-    return token_data, token_bonds
+    return token_data, token_bonds, token_interactions
 
 
 class Boltz2Tokenizer(Tokenizer):
@@ -394,7 +411,7 @@ class Boltz2Tokenizer(Tokenizer):
 
         """
         # Tokenize the structure
-        token_data, token_bonds = tokenize_structure(
+        token_data, token_bonds, token_interactions = tokenize_structure(
             data.structure, data.record.affinity
         )
 
@@ -414,6 +431,7 @@ class Boltz2Tokenizer(Tokenizer):
         tokenized = Tokenized(
             tokens=token_data,
             bonds=token_bonds,
+            interactions=token_interactions,
             structure=data.structure,
             msa=data.msa,
             record=data.record,

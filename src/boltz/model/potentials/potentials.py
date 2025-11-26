@@ -306,7 +306,21 @@ class DistancePotential(Potential):
     def compute_variable(
         self, coords, index, ref_coords=None, ref_mask=None, compute_gradient=False
     ):
-        r_ij = coords.index_select(-2, index[0]) - coords.index_select(-2, index[1])
+        # Ensure index is [2, N] format
+        if index.dim() == 2 and index.shape[0] == 2:
+            index_0 = index[0]
+            index_1 = index[1]
+        elif index.dim() == 1:
+            # If index is 1D, assume it's a flat representation - this shouldn't happen but handle it
+            raise ValueError(f"DistancePotential expects index to be [2, N] but got shape {index.shape}")
+        else:
+            raise ValueError(f"DistancePotential expects index to be [2, N] but got shape {index.shape}")
+        
+        # Ensure indices are 1D vectors for index_select
+        if index_0.dim() != 1 or index_1.dim() != 1:
+            raise ValueError(f"DistancePotential index[0] and index[1] must be 1D vectors, got shapes {index_0.shape} and {index_1.shape}")
+        
+        r_ij = coords.index_select(-2, index_0) - coords.index_select(-2, index_1)
         r_ij_norm = torch.linalg.norm(r_ij, dim=-1)
         r_hat_ij = r_ij / r_ij_norm.unsqueeze(-1)
 
@@ -683,6 +697,308 @@ class RepulsionContactPotential(FlatBottomPotential, DistancePotential):
             (negation_mask, union_index),
         )
 
+
+class PLIPInteractionPotential(FlatBottomPotential, DistancePotential):
+    """
+    Potential for PLIP-derived protein-ligand interactions.
+    
+    Supports multiple interaction types:
+    - Hydrogen bonds (distance constraints on donor-acceptor pairs)
+    - Hydrophobic contacts (favorable distance ranges)
+    - Salt bridges (ionic interactions)
+    - Pi-stacking and Pi-cation interactions
+    - Halogen bonds
+    
+    The potential reads interaction data from feats and applies distance
+    constraints to guide the model toward preserving known interactions.
+    """
+    
+    def compute_args(self, feats, parameters):
+        """
+        Extract PLIP interaction indices and distance constraints from feats.
+        
+        Expected features:
+        - plip_interaction_index: [2, N] tensor of atom pair indices
+        - plip_interaction_type: [N] tensor of interaction type codes
+          (0: H-bond, 1: hydrophobic, 2: salt bridge, 3: pi-stacking, etc.)
+        - plip_target_distance: [N] tensor of target/reference distances
+        - plip_interaction_mask: [N] boolean mask for valid interactions
+        
+        Parameters:
+        - hbond_tolerance: tolerance for hydrogen bond distances (Å)
+        - hydrophobic_tolerance: tolerance for hydrophobic contacts (Å)
+        - ionic_tolerance: tolerance for salt bridges (Å)
+        - strength_weight: weight factor for interaction strength
+        """
+        # Check if PLIP features are present
+        if "plip_interaction_index" not in feats:
+            print("DEBUG: plip_interaction_index not in feats")
+            return torch.empty([2, 0], device=feats["atom_pad_mask"].device), (
+                torch.empty([0]), None, None
+            ), None, None, None
+        
+        raw_pair_index = feats["plip_interaction_index"][0]
+        print(f"DEBUG: plip_interaction_index raw shape: {raw_pair_index.shape}, dim: {raw_pair_index.dim()}")
+        
+        # Handle different possible shapes: [1, 2, N] or [2, N]
+        if raw_pair_index.dim() == 3:
+            # Remove batch dimension: [1, 2, N] -> [2, N]
+            pair_index = raw_pair_index.squeeze(0)
+            print(f"DEBUG: After squeeze(0), shape: {pair_index.shape}")
+        elif raw_pair_index.dim() == 2:
+            pair_index = raw_pair_index
+        else:
+            raise ValueError(f"plip_interaction_index must be [2, N] or [1, 2, N] but got shape {raw_pair_index.shape}")
+        
+        # Check if empty after shape handling
+        if pair_index.shape[1] == 0:
+            print("DEBUG: pair_index is empty after shape handling")
+            return torch.empty([2, 0], device=pair_index.device), (
+                torch.empty([0]), None, None
+            ), None, None, None
+        
+        # Ensure pair_index is [2, N] format
+        if pair_index.dim() != 2 or pair_index.shape[0] != 2:
+            raise ValueError(f"plip_interaction_index must be [2, N] but got shape {pair_index.shape} after processing")
+        
+        print(f"DEBUG: Final pair_index shape: {pair_index.shape}")
+        
+        raw_interaction_types = feats["plip_interaction_type"][0]
+        raw_target_distances = feats["plip_target_distance"][0]
+        raw_interaction_mask = feats.get("plip_interaction_mask", [torch.ones(pair_index.shape[1], dtype=torch.bool, device=pair_index.device)])[0]
+        
+        # Handle batch dimension if present
+        if raw_interaction_types.dim() == 2:
+            interaction_types = raw_interaction_types.squeeze(0)
+        else:
+            interaction_types = raw_interaction_types
+        if raw_target_distances.dim() == 2:
+            target_distances = raw_target_distances.squeeze(0)
+        else:
+            target_distances = raw_target_distances
+        if raw_interaction_mask.dim() == 2:
+            interaction_mask = raw_interaction_mask.squeeze(0)
+        else:
+            interaction_mask = raw_interaction_mask
+        
+        print(f"DEBUG: interaction_types shape: {interaction_types.shape}, target_distances shape: {target_distances.shape}, mask shape: {interaction_mask.shape}")
+        
+        # Filter by mask
+        pair_index = pair_index[:, interaction_mask]
+        interaction_types = interaction_types[interaction_mask]
+        target_distances = target_distances[interaction_mask]
+        
+        if pair_index.shape[1] == 0:
+            return torch.empty([2, 0], device=pair_index.device), (
+                torch.empty([0], device=pair_index.device), None, None
+            ), None, None, None
+        
+        # Get interaction strengths if available
+        raw_interaction_strengths = feats.get("plip_interaction_strength", [torch.ones_like(target_distances)])[0]
+        if raw_interaction_strengths.dim() == 2:
+            interaction_strengths = raw_interaction_strengths.squeeze(0)
+        else:
+            interaction_strengths = raw_interaction_strengths
+        interaction_strengths = interaction_strengths[interaction_mask]
+        
+        # Define tolerances for different interaction types
+        # Type codes: 0=H-bond, 1=hydrophobic, 2=salt_bridge, 3=pi-stack, 4=pi-cation, 5=halogen
+        tolerances = torch.zeros_like(target_distances)
+        
+        # Hydrogen bonds: tight constraints (0=H-bond)
+        hbond_mask = interaction_types == 0
+        tolerances[hbond_mask] = parameters.get("hbond_tolerance", 0.3)
+        
+        # Hydrophobic contacts: wider tolerance (1=hydrophobic)
+        hydrophobic_mask = interaction_types == 1
+        tolerances[hydrophobic_mask] = parameters.get("hydrophobic_tolerance", 0.5)
+        
+        # Salt bridges: moderate tolerance (2=salt_bridge)
+        saltbridge_mask = interaction_types == 2
+        tolerances[saltbridge_mask] = parameters.get("ionic_tolerance", 0.4)
+        
+        # Pi-stacking: moderate tolerance (3=pi-stack)
+        pistack_mask = interaction_types == 3
+        tolerances[pistack_mask] = parameters.get("pi_tolerance", 0.4)
+        
+        # Pi-cation: moderate tolerance (4=pi-cation)
+        pication_mask = interaction_types == 4
+        tolerances[pication_mask] = parameters.get("pi_tolerance", 0.4)
+        
+        # Halogen bonds: tight constraints (5=halogen)
+        halogen_mask = interaction_types == 5
+        tolerances[halogen_mask] = parameters.get("halogen_tolerance", 0.3)
+        
+        # Set lower and upper bounds based on target distances and tolerances
+        lower_bounds = target_distances - tolerances
+        upper_bounds = target_distances + tolerances
+        
+        # Ensure non-negative distances
+        lower_bounds = torch.clamp(lower_bounds, min=0.0)
+        
+        # Apply strength-based weighting to force constants
+        k = interaction_strengths * parameters.get("strength_weight", 1.0)
+        
+        return pair_index, (k, lower_bounds, upper_bounds), None, None, None
+
+
+class PLIPHydrogenBondPotential(FlatBottomPotential, DistancePotential):
+    """
+    Specialized potential for PLIP hydrogen bonds with angle considerations.
+    
+    This potential specifically targets hydrogen bonds and can incorporate
+    angle information if available (donor-H-acceptor angle).
+    """
+    
+    def compute_args(self, feats, parameters):
+        """
+        Extract hydrogen bond constraints from PLIP annotations.
+        
+        Expected features:
+        - plip_hbond_donor_idx: [N] donor atom indices
+        - plip_hbond_acceptor_idx: [N] acceptor atom indices  
+        - plip_hbond_distance: [N] optimal H...A distances
+        - plip_hbond_strength: [N] bond strength scores
+        """
+        if "plip_hbond_donor_idx" not in feats:
+            print("DEBUG: plip_hbond_donor_idx not in feats")
+            return torch.empty([2, 0], device=feats["atom_pad_mask"].device), (
+                torch.empty([0]), None, None
+            ), None, None, None
+        
+        raw_donor_idx = feats["plip_hbond_donor_idx"][0]
+        raw_acceptor_idx = feats["plip_hbond_acceptor_idx"][0]
+        raw_target_distances = feats["plip_hbond_distance"][0]
+        
+        print(f"DEBUG: plip_hbond_donor_idx shape: {raw_donor_idx.shape}, acceptor_idx shape: {raw_acceptor_idx.shape}")
+        
+        # Handle batch dimension if present: [1, N] -> [N]
+        if raw_donor_idx.dim() == 2:
+            donor_idx = raw_donor_idx.squeeze(0)
+        else:
+            donor_idx = raw_donor_idx
+        if raw_acceptor_idx.dim() == 2:
+            acceptor_idx = raw_acceptor_idx.squeeze(0)
+        else:
+            acceptor_idx = raw_acceptor_idx
+        if raw_target_distances.dim() == 2:
+            target_distances = raw_target_distances.squeeze(0)
+        else:
+            target_distances = raw_target_distances
+        
+        # Check if empty
+        if donor_idx.shape[0] == 0:
+            print("DEBUG: donor_idx is empty")
+            return torch.empty([2, 0], device=donor_idx.device), (
+                torch.empty([0]), None, None
+            ), None, None, None
+        
+        # Ensure indices are 1D
+        if donor_idx.dim() != 1:
+            donor_idx = donor_idx.flatten()
+        if acceptor_idx.dim() != 1:
+            acceptor_idx = acceptor_idx.flatten()
+        
+        # Ensure they have the same length
+        if donor_idx.shape[0] != acceptor_idx.shape[0]:
+            raise ValueError(f"Donor and acceptor indices must have same length, got {donor_idx.shape[0]} and {acceptor_idx.shape[0]}")
+        
+        # Stack into pair index
+        pair_index = torch.stack([donor_idx, acceptor_idx], dim=0)
+        print(f"DEBUG: Stacked pair_index shape: {pair_index.shape}")
+        
+        # Get strength information
+        raw_hbond_strengths = feats.get("plip_hbond_strength", [torch.ones_like(target_distances)])[0]
+        if raw_hbond_strengths.dim() == 2:
+            hbond_strengths = raw_hbond_strengths.squeeze(0)
+        else:
+            hbond_strengths = raw_hbond_strengths
+        
+        # Hydrogen bonds should be tight - use narrow tolerance window
+        tolerance = parameters.get("hbond_tolerance", 0.25)  # ±0.25 Å
+        
+        lower_bounds = torch.clamp(target_distances - tolerance, min=1.5)  # H-bonds typically > 1.5 Å
+        upper_bounds = target_distances + tolerance
+        
+        # Stronger H-bonds get higher force constants
+        k = hbond_strengths * parameters.get("hbond_force_constant", 1.0)
+        
+        return pair_index, (k, lower_bounds, upper_bounds), None, None, None
+
+
+class PLIPHydrophobicPotential(FlatBottomPotential, DistancePotential):
+    """
+    Potential for hydrophobic interactions from PLIP analysis.
+    
+    Hydrophobic contacts are generally weaker and have more flexible
+    distance requirements compared to H-bonds.
+    """
+    
+    def compute_args(self, feats, parameters):
+        """
+        Extract hydrophobic contact constraints from PLIP annotations.
+        
+        Expected features:
+        - plip_hydrophobic_ligand_idx: [N] ligand atom indices
+        - plip_hydrophobic_protein_idx: [N] protein atom indices
+        - plip_hydrophobic_distance: [N] observed distances
+        """
+        if "plip_hydrophobic_ligand_idx" not in feats:
+            print("DEBUG: plip_hydrophobic_ligand_idx not in feats")
+            return torch.empty([2, 0], device=feats["atom_pad_mask"].device), (
+                torch.empty([0]), None, None
+            ), None, None, None
+        
+        raw_ligand_idx = feats["plip_hydrophobic_ligand_idx"][0]
+        raw_protein_idx = feats["plip_hydrophobic_protein_idx"][0]
+        raw_target_distances = feats["plip_hydrophobic_distance"][0]
+        
+        print(f"DEBUG: plip_hydrophobic_ligand_idx shape: {raw_ligand_idx.shape}, protein_idx shape: {raw_protein_idx.shape}")
+        
+        # Handle batch dimension if present: [1, N] -> [N]
+        if raw_ligand_idx.dim() == 2:
+            ligand_idx = raw_ligand_idx.squeeze(0)
+        else:
+            ligand_idx = raw_ligand_idx
+        if raw_protein_idx.dim() == 2:
+            protein_idx = raw_protein_idx.squeeze(0)
+        else:
+            protein_idx = raw_protein_idx
+        if raw_target_distances.dim() == 2:
+            target_distances = raw_target_distances.squeeze(0)
+        else:
+            target_distances = raw_target_distances
+        
+        # Check if empty
+        if ligand_idx.shape[0] == 0:
+            print("DEBUG: ligand_idx is empty")
+            return torch.empty([2, 0], device=ligand_idx.device), (
+                torch.empty([0]), None, None
+            ), None, None, None
+        
+        # Ensure indices are 1D
+        if ligand_idx.dim() != 1:
+            ligand_idx = ligand_idx.flatten()
+        if protein_idx.dim() != 1:
+            protein_idx = protein_idx.flatten()
+        
+        # Ensure they have the same length
+        if ligand_idx.shape[0] != protein_idx.shape[0]:
+            raise ValueError(f"Ligand and protein indices must have same length, got {ligand_idx.shape[0]} and {protein_idx.shape[0]}")
+        
+        pair_index = torch.stack([ligand_idx, protein_idx], dim=0)
+        
+        # Hydrophobic contacts are more flexible
+        tolerance = parameters.get("hydrophobic_tolerance", 0.6)  # ±0.6 Å
+        
+        lower_bounds = torch.clamp(target_distances - tolerance, min=2.5)  # Typically > 2.5 Å
+        upper_bounds = target_distances + tolerance
+        
+        # Uniform force constant for hydrophobic contacts
+        k = torch.ones_like(target_distances) * parameters.get("hydrophobic_force_constant", 0.5)
+        
+        return pair_index, (k, lower_bounds, upper_bounds), None, None, None
+
 def get_potentials(steering_args, boltz2=False):
     potentials = []
     if steering_args["fk_steering"] or steering_args["physical_guidance_update"]:
@@ -724,18 +1040,18 @@ def get_potentials(steering_args, boltz2=False):
                         "buffer": 2.0,
                     }
                 ),
-                PoseBustersPotential(
-                    parameters={
-                        "guidance_interval": 1,
-                        "guidance_weight": 0.01
-                        if steering_args["physical_guidance_update"]
-                        else 0.0,
-                        "resampling_weight": 0.1,
-                        "bond_buffer": 0.125,
-                        "angle_buffer": 0.125,
-                        "clash_buffer": 0.10,
-                    }
-                ),
+                # PoseBustersPotential(
+                #     parameters={
+                #         "guidance_interval": 1,
+                #         "guidance_weight": 0.01
+                #         if steering_args["physical_guidance_update"]
+                #         else 0.0,
+                #         "resampling_weight": 0.1,
+                #         "bond_buffer": 0.125,
+                #         "angle_buffer": 0.125,
+                #         "clash_buffer": 0.10,
+                #     }
+                # ),
                 ChiralAtomPotential(
                     parameters={
                         "guidance_interval": 1,
@@ -800,4 +1116,32 @@ def get_potentials(steering_args, boltz2=False):
                 ),
             ]
         )
+    
+    # Add PLIP-based interaction potentials if enabled
+    # These are applied only in late time steps (when structure is more formed)
+    # to avoid enforcing interactions on invalid/early structures
+    if steering_args.get("interaction_guidance_update", False):
+        print("Adding PLIP-based interaction potentials (late time steps only)")
+        # Use PiecewiseStepFunction to activate only in late time steps
+        # In diffusion, t goes from 1.0 (noise) to 0.0 (data)
+        # thresholds=[0.3] with values=[0.0, weight] means:
+        #   - t > 0.3 (early steps): inactive (0.0)
+        #   - t <= 0.3 (late steps): active (weight)
+        late_step_threshold = 0.5  # Activate in last 30% of diffusion process
+        
+        potentials.append(
+            PLIPHydrogenBondPotential(
+                parameters={
+                    "guidance_interval": 2,
+                    "guidance_weight": PiecewiseStepFunction(
+                        thresholds=[late_step_threshold], 
+                        values=[0.0, 10.0]  # Inactive early, active late with increased weight 1.0
+                    ),
+                    "resampling_weight": 4.0,
+                    "hbond_tolerance": 0.1,  # ±0.25 Å
+                    "hbond_force_constant": 1.5,  # Increased from 1.5 to 3.0 for stronger enforcement
+                }
+            )
+        )
+    
     return potentials
