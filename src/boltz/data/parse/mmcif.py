@@ -19,6 +19,7 @@ from boltz.data.types import (
     Coords,
     Ensemble,
     Interface,
+    Interaction,
     Residue,
     StructureInfo,
     StructureV2,
@@ -362,6 +363,182 @@ def compute_interfaces(atom_data: np.ndarray, chain_data: np.ndarray) -> np.ndar
     interfaces = np.array(interfaces, dtype=Interface)
     return interfaces
 
+# def count_noncovalents(feat):
+    # metrics = {}
+    # with warnings.catch_warnings():
+    #     warnings.simplefilter("ignore")
+    #     biotite_array = biotite_array_from_feat(feat)
+    #     biotite_array, _ = hydride.add_hydrogen(biotite_array)
+    #     hbond = biotite.structure.hbond(biotite_array)
+    # donor_idxs, acceptor_idxs = hbond[:, 0], hbond[:, 2]
+    # cross_design_hbonds = (
+    #     biotite_array.is_design[donor_idxs] != biotite_array.is_design[acceptor_idxs]
+    # )
+    # metrics["plip_hbonds"] = int(cross_design_hbonds.sum())
+
+    # # saltbridges
+    # pos_atoms = biotite_array[biotite_array.charge > 0]
+    # neg_atoms = biotite_array[biotite_array.charge < 0]
+    # if len(neg_atoms) > 0 and len(pos_atoms) > 0:
+    #     pos_neg_distances = torch.cdist(
+    #         torch.as_tensor(pos_atoms.coord), torch.as_tensor(neg_atoms.coord)
+    #     )
+    #     pos_idxs, neg_idxs = torch.where(
+    #         (pos_neg_distances > 0.5) & (pos_neg_distances < 5.5)
+    #     )
+    #     # only keep the ones between design and non design
+    #     cross_design_saltbridges = (
+    #         pos_atoms.is_design[pos_idxs] != neg_atoms.is_design[neg_idxs]
+    #     )
+    #     metrics["plip_saltbridge"] = int(cross_design_saltbridges.sum())
+    # else:
+    #     metrics["plip_saltbridge"] = 0
+    # return metrics
+
+
+def compute_interactions(
+    atom_data: np.ndarray,
+    chain_data: np.ndarray,
+    residue_data: np.ndarray,
+    target_chain_mask: Optional[np.ndarray],
+    binder_chain_mask: Optional[np.ndarray],
+) -> np.ndarray:
+    """Annotate interactions between protein and ligand atoms using KDTree.
+
+    Parameters
+    ----------
+    atom_data : np.ndarray
+        The atom data with dtype AtomV2.
+    chain_data : np.ndarray
+        The chain data with dtype Chain.
+    residue_data : Optional[np.ndarray], optional
+        The residue data with dtype Residue. If provided, used to get residue names.
+    atom_properties : Optional[dict[str, np.ndarray]], optional
+        Dictionary with atom property arrays. Keys: 'donor', 'acceptor', 'hydrophobic',
+        'positive', 'negative', 'aromatic'. Each array should have length matching atom_data.
+
+    Returns
+    -------
+    np.ndarray
+        The annotated interactions with Interaction dtype.
+    """
+    # Target: typically protein chains (mol_type=0)
+    # Binder: can be RNA, DNA, or protein chains (mol_type=0, 1, or 2)
+
+    # cutoffs = {
+    #     "close_contact": 4.0,
+    #     "hydrophobic": 5.0,
+    #     "hbond_max": 3.7,
+    #     "hbond_min": 2.5,
+    #     "pistack_min": 3.5,
+    #     "pistack_max": 5.5,
+    #     "ionic": 5.0,
+    # }
+
+    # Compute chain_id per atom
+    extended_chain_ids = []
+    for idx, chain in enumerate(chain_data):
+        extended_chain_ids.extend([idx] * chain["atom_num"])
+    extended_chain_ids = np.array(extended_chain_ids)
+
+    # Filter to present atoms
+    mask = atom_data["is_present"]
+    coords = atom_data["coords"][mask]
+    extended_chain_ids_filtered = extended_chain_ids[mask]
+    atom_indices_filtered = np.where(mask)[0]
+
+    if (target_chain_mask is None) and (binder_chain_mask is None):
+        target_chain_mask = np.isin(chain_data["mol_type"], const.chain_type_ids["PROTEIN"])
+        binder_chain_mask = np.isin(chain_data["mol_type"], const.chain_type_ids["NONPOLYMER"])
+    else:
+        target_chain_mask = np.isin(chain_data, target_chain_mask)
+        binder_chain_mask = np.isin(chain_data, binder_chain_mask)
+
+    if target_chain_mask.sum() == 0 or binder_chain_mask.sum() == 0:
+        raise ValueError("No target or binder chains found")
+
+    # Map chain-level masks to atom-level masks
+    target_chain_indices = np.where(target_chain_mask)[0]
+    binder_chain_indices = np.where(binder_chain_mask)[0]
+
+    # Create atom-level masks for target and binder
+    target_atom_mask = np.isin(extended_chain_ids_filtered, target_chain_indices)
+    binder_atom_mask = np.isin(extended_chain_ids_filtered, binder_chain_indices)
+
+    target_atom_indices = atom_indices_filtered[target_atom_mask]
+    # binder_atom_indices = atom_indices_filtered[binder_atom_mask]
+    target_coords = coords[target_atom_mask]
+    binder_coords = coords[binder_atom_mask]
+
+    # Build KDTree for binder atoms
+    binder_tree = KDTree(binder_coords, metric="euclidean")
+
+    # Build Mapper Helper: mapping from atom index to residue name and residue index
+    atom_to_resname = {}
+    atom_to_residx = {}
+    if residue_data is not None:
+        atom_idx = 0
+        for chain in chain_data:
+            chain_res_idx = chain["res_idx"]
+            for res_idx_local in range(chain["res_num"]):
+                res_idx = chain_res_idx + res_idx_local
+                if res_idx < len(residue_data):
+                    res_name = residue_data[res_idx]["name"]
+                    num_atoms = residue_data[res_idx]["atom_num"]
+                    for _ in range(num_atoms):
+                        atom_to_resname[atom_idx] = res_name
+                        atom_to_residx[atom_idx] = res_idx
+                        atom_idx += 1
+
+    # Extract aromatic ring centroids from binder chains
+    # Aromatic residues: PHE, TYR, TRP, HIS
+    AROMATIC_RESIDUES = {"PHE", "TYR", "TRP", "HIS"}
+    AROMATIC_RING_ATOMS = {
+        "PHE": ["CG", "CD1", "CD2", "CE1", "CE2", "CZ"],
+        "TYR": ["CG", "CD1", "CD2", "CE1", "CE2", "CZ"],
+        "TRP": ["CD2", "CE2", "CE3", "CZ2", "CZ3", "CH2"],
+        "HIS": ["CG", "ND1", "CD2", "CE1", "NE2"],
+    }
+
+    aromatic_ring_centroids = []
+    aromatic_ring_residues = []
+    aromatic_ring_atoms = []
+
+    query = binder_tree.query_radius(target_coords, 4.5)
+
+    # O(n*m) where n is number of target atoms that are close to binder atoms and m is the maximum number of atoms in the binder residue
+    for target_atom_idx in target_atom_indices:
+        nearby_binder_atom_indices = query[target_atom_idx]
+        if len(nearby_binder_atom_indices) == 0:
+            continue
+                
+        target_resname = atom_to_resname[target_atom_idx]
+
+        if target_resname in AROMATIC_RESIDUES:
+            # Get only aromatic ring atoms from that residue
+            ring_residue_idx = atom_to_residx[target_atom_idx]
+            ring_atom_start_idx = residue_data[ring_residue_idx]["atom_idx"]
+            ring_atom_names = set(AROMATIC_RING_ATOMS[target_resname])
+            
+            ring_coords = []
+            for i in range(residue_data[ring_residue_idx]["atom_num"]):
+                atom_idx = ring_atom_start_idx + i
+                atom_name = atom_data[atom_idx]["name"]
+                if atom_name in ring_atom_names:
+                    ring_coords.append(atom_data[atom_idx]["coords"])
+            
+            if len(ring_coords) > 0:
+                ring_coords = np.array(ring_coords)
+                centroid = np.mean(ring_coords, axis=0)
+
+                aromatic_ring_centroids.append(centroid)
+                aromatic_ring_atoms.append(ring_atom_start_idx)
+                aromatic_ring_residues.append((ring_residue_idx, residue_data[ring_residue_idx]["name"]))
+
+            return aromatic_ring_centroids, aromatic_ring_atoms, aromatic_ring_residues
+
+    # interactions = np.array(interactions, dtype=Interaction)
+    # return interactions
 
 ####################################################################################################
 # PARSING
@@ -804,6 +981,7 @@ def parse_mmcif(  # noqa: C901, PLR0915, PLR0912
     moldir: Optional[str] = None,
     use_assembly: bool = True,
     compute_interfaces: bool = True,
+    annotate_interactions: bool = False,
 ) -> ParsedStructure:
     """Parse a structure in MMCIF format.
 
@@ -1206,7 +1384,12 @@ def parse_mmcif(  # noqa: C901, PLR0915, PLR0912
     if compute_interfaces:
         interfaces = compute_interfaces(atoms, chains)
     else:
-        interfaces = np.array([], dtype=Interface)
+        interfaces = np.array([], dtype=Interface)    
+
+    if annotate_interactions:
+        interactions = compute_interactions(atoms, chains, residues)
+    else:
+        interactions = np.array([], dtype=Interaction)
 
     # Return parsed structure
     info = StructureInfo(
@@ -1230,6 +1413,7 @@ def parse_mmcif(  # noqa: C901, PLR0915, PLR0912
         mask=mask,
         ensemble=ensemble,
         coords=coords,
+        interactions=interactions,
     )
 
     return ParsedStructure(
