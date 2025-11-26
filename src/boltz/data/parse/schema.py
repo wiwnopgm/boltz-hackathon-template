@@ -1512,6 +1512,7 @@ def parse_boltz_schema(  # noqa: C901, PLR0915, PLR0912
     connections = []
     pocket_constraints = []
     contact_constraints = []
+    negative_pocket_constraints = []
     constraints = schema.get("constraints", [])
     for constraint in constraints:
         if "bond" in constraint:
@@ -1559,6 +1560,38 @@ def parse_boltz_schema(  # noqa: C901, PLR0915, PLR0912
 
             force = constraint["pocket"].get("force", False)
             pocket_constraints.append((binder, contacts, max_distance, force))
+        elif "negative_pocket" in constraint:
+            if (
+                "binder" not in constraint["negative_pocket"]
+                or "contacts" not in constraint["negative_pocket"]
+            ):
+                msg = f"Negative pocket constraint was not properly specified"
+                raise ValueError(msg)
+
+            if not boltz_2:
+                msg = f"Negative pocket constraint is not supported in Boltz-1!"
+                raise ValueError(msg)
+
+            min_distance = constraint["negative_pocket"].get("min_distance", 6.0)
+
+            binder = constraint["negative_pocket"]["binder"]
+            binder = chain_to_idx[binder]
+
+            contacts = []
+            for chain_name, residue_index_or_atom_name in constraint["negative_pocket"][
+                "contacts"
+            ]:
+                contact = token_spec_to_ids(
+                    chain_name,
+                    residue_index_or_atom_name,
+                    chain_to_idx,
+                    atom_idx_map,
+                    chains,
+                )
+                contacts.append(contact)
+
+            force = constraint["negative_pocket"].get("force", False)
+            negative_pocket_constraints.append((binder, contacts, min_distance, force))
         elif "contact" in constraint:
             if (
                 "token1" not in constraint["contact"]
@@ -1804,7 +1837,9 @@ def parse_boltz_schema(  # noqa: C901, PLR0915, PLR0912
         chain_infos.append(chain_info)
 
     options = InferenceOptions(
-        pocket_constraints=pocket_constraints, contact_constraints=contact_constraints
+        pocket_constraints=pocket_constraints,
+        contact_constraints=contact_constraints,
+        negative_pocket_constraints=negative_pocket_constraints,
     )
     record = Record(
         id=name,
