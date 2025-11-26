@@ -1,11 +1,18 @@
 import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Optional, Union
+from typing import Optional, Union, Dict, Tuple
+import torch
 
 import numpy as np
 from mashumaro.mixins.dict import DataClassDictMixin
 from rdkit.Chem import Mol
+
+from boltz.data import const
+import re
+import string
+import biotite.structure
+from biotite.structure import AtomArray, BondList, BondType
 
 ####################################################################################################
 # SERIALIZABLE
@@ -153,6 +160,18 @@ Connection = [
 Interface = [
     ("chain_1", np.dtype("i4")),
     ("chain_2", np.dtype("i4")),
+]
+
+Interaction = [
+    ("interaction_type", np.dtype("<U5")),
+    ("chain_1", np.dtype("i4")),
+    ("chain_2", np.dtype("i4")),
+    ("res_1", np.dtype("i4")),
+    ("res_2", np.dtype("i4")),
+    ("atom_1", np.dtype("i4")),
+    ("atom_2", np.dtype("i4")),
+    ("distance", np.dtype("f4")),
+    ("angle", np.dtype("f4"))
 ]
 
 Coords = [
@@ -331,6 +350,7 @@ class StructureV2(NumpySerializable):
     mask: np.ndarray
     coords: np.ndarray
     ensemble: np.ndarray
+    interactions: Optional[np.ndarray] = None
     pocket: Optional[np.ndarray] = None
 
     def remove_invalid_chains(self) -> "StructureV2":  # noqa: PLR0915
@@ -439,7 +459,199 @@ class StructureV2(NumpySerializable):
             coords=coords,
             ensemble=ensemble,
         )
+        
+    def to_biotite_array(
+        self,
+        design_atoms_mask: Optional[np.ndarray] = None
+    ) -> AtomArray:
+        """Convert this StructureV2 to a biotite AtomArray.
+        
+        This method uses the bonds information to construct proper connectivity.
+        
+        Parameters
+        ----------
+        design_atoms_mask : np.ndarray, optional
+            Boolean mask indicating which atoms are part of the design
+            
+        Returns
+        -------
+        biotite.structure.AtomArray
+            Biotite structure with atoms and optional design mask annotation
+        """
+        
+        # Use instance attributes
+        atoms = self.atoms
+        bonds = self.bonds
+        residues = self.residues
+        chains = self.chains
+        coords = self.coords
+        
+        # Build biotite atoms directly from the input arrays
+        biotite_atoms = []
 
+        chain_names = [re.sub(r"\d+", "", c["name"]) for c in chains]
+        chain_id_pool = list(reversed(string.ascii_uppercase)) + list(
+            reversed(string.digits)
+        )
+        used_names = []
+        old_to_new_chainid = {}
+        for chain in chains:
+            old_chainid = chain["name"].item()
+            new_chainid = re.sub(r"\d+", "", old_chainid)
+            if new_chainid in used_names:
+                # Find next unused chain ID from the pool
+                for candidate in chain_id_pool:
+                    if candidate not in chain_names and candidate not in used_names:
+                        new_chainid = candidate
+                        break
+            old_to_new_chainid[old_chainid] = new_chainid
+            used_names.append(new_chainid)
+
+        for chain in chains:
+            old_chainid = chain["name"].item()
+            chain_id = old_to_new_chainid[old_chainid]
+
+            residues_in_chain = residues[
+                chain["res_idx"] : chain["res_idx"] + chain["res_num"]
+            ]
+
+            for res in residues_in_chain:
+                # Missing residues are in the seqres but not in the residue table
+                if not res["is_present"]:
+                    continue
+
+                res_name = res["name"].item()
+                atoms_in_res = atoms[res["atom_idx"] : res["atom_idx"] + res["atom_num"]]
+
+                if coords is not None:
+                    coords_in_res = coords["coords"][
+                        res["atom_idx"] : res["atom_idx"] + res["atom_num"]
+                    ]
+                else:
+                    # Use coords from atoms array if separate coords not provided
+                    coords_in_res = atoms_in_res["coords"]
+
+                for atom, coord, atom_idx in zip(
+                    atoms_in_res,
+                    coords_in_res,
+                    np.arange(res["atom_idx"], res["atom_idx"] + res["atom_num"]),
+                ):
+                    # Skip missing atoms
+                    if not atom["is_present"]:
+                        continue
+
+                    atom_name = atom["name"].item()
+                    element = elem_from_name(atom_name, res_name)
+
+                    # Skip fake atoms
+                    # if (
+                    #     const.fake_element.upper() in atom_name
+                    #     or const.mask_element.upper() in atom_name
+                    # ):
+                    #     assert (
+                    #         element == const.fake_element or element == const.mask_element
+                    #     ), "Atom name not consistent with element for possible fake atom."
+                    #     continue
+
+                    # Default charge to 0 if not available
+                    charge = 0
+                    if res_name in const.formal_charges:
+                        if atom_name in const.formal_charges[res_name]:
+                            charge = const.formal_charges[res_name][atom_name]
+                    
+                    biotite_atom = biotite.structure.Atom(
+                        coord,
+                        chain_id=chain_id,
+                        res_id=res["res_idx"],
+                        res_name=res_name,
+                        atom_name=atom_name,
+                        element=element,
+                        charge=charge,
+                    )
+
+                    biotite_atoms.append(biotite_atom)
+        
+        atom_array = biotite.structure.array(biotite_atoms)
+        
+        # Construct bonds from the bonds array
+        if bonds is not None and len(bonds) > 0:
+            bond_list = []
+            # Create a mapping from original atom indices to biotite atom array indices
+            # We need to account for atoms that were skipped (missing or fake atoms)
+            original_to_biotite_idx = {}
+            biotite_idx = 0
+            
+            for chain in chains:
+                residues_in_chain = residues[
+                    chain["res_idx"] : chain["res_idx"] + chain["res_num"]
+                ]
+                
+                for res in residues_in_chain:
+                    if not res["is_present"]:
+                        continue
+                    
+                    res_name = res["name"].item()
+                    atoms_in_res = atoms[res["atom_idx"] : res["atom_idx"] + res["atom_num"]]
+                    
+                    for atom_idx_offset, atom in enumerate(atoms_in_res):
+                        original_atom_idx = res["atom_idx"] + atom_idx_offset
+                        
+                        # Skip if atom is not present
+                        if not atom["is_present"]:
+                            continue
+                        
+                        atom_name = atom["name"].item()
+                        # Skip fake atoms
+                        # if (
+                        #     const.fake_element.upper() in atom_name
+                        #     or const.mask_element.upper() in atom_name
+                        # ):
+                        #     continue
+                        
+                        original_to_biotite_idx[original_atom_idx] = biotite_idx
+                        biotite_idx += 1
+            
+            # Now construct bonds using the mapping
+            for bond in bonds:
+                atom1_orig = bond["atom_1"]
+                atom2_orig = bond["atom_2"]
+                # Check if both atoms are in the biotite array
+                if atom1_orig in original_to_biotite_idx and atom2_orig in original_to_biotite_idx:
+                    biotite_idx1 = original_to_biotite_idx[atom1_orig]
+                    biotite_idx2 = original_to_biotite_idx[atom2_orig]
+                    bond_list.append((biotite_idx1, biotite_idx2, BondType(bond["type"])))
+            
+            # Create BondList from the bonds
+            if bond_list:
+                atom_array.bonds = BondList(len(atom_array), np.array(bond_list))
+        
+        # Add design mask annotation if provided
+        if design_atoms_mask is not None:
+            atom_array.add_annotation("is_design", bool)
+            atom_array.is_design = design_atoms_mask
+
+        return atom_array
+
+def numeric_to_string(
+    name: Union[Tuple[int, int, int, int], Tuple[int, int, int, int, int]],
+) -> str:
+    name = [chr(c + 32) for c in name if c != 0]
+    name = "".join(name)
+    return name
+
+def elem_from_name(atom_name, res_name):
+    atom_key = re.sub(r"\d", "", atom_name)
+    if atom_key in const.ambiguous_atoms:
+        if isinstance(const.ambiguous_atoms[atom_key], str):
+            element = const.ambiguous_atoms[atom_key]
+        elif res_name in const.ambiguous_atoms[atom_key]:
+            element = const.ambiguous_atoms[atom_key][res_name]
+        else:
+            element = const.ambiguous_atoms[atom_key]["*"]
+    else:
+        element = atom_key[0]
+    return element
+    
 
 ####################################################################################################
 # MSA
@@ -530,6 +742,9 @@ class InferenceOptions:
     negative_pocket_constraints: Optional[
         list[tuple[int, list[tuple[int, int]], float, bool]]
     ] = None
+    interaction_constraints: Optional[
+        list[tuple[tuple[int, int], tuple[int, int], str, float, float, bool]]
+    ] = None  # (token1, token2, interaction_type, target_distance, tolerance, force)
 
 
 @dataclass(frozen=True)
@@ -770,6 +985,14 @@ TokenBondV2 = [
     ("type", np.dtype("i1")),
 ]
 
+TokenInteractionV2 = [
+    ("token_1", np.dtype("i4")),
+    ("token_2", np.dtype("i4")),
+    ("type", np.dtype("i1")),
+    ("distance", np.dtype("f4")),
+    ("angle", np.dtype("f4"))
+]
+
 
 @dataclass(frozen=True)
 class Tokenized:
@@ -779,6 +1002,7 @@ class Tokenized:
     bonds: np.ndarray
     structure: Structure
     msa: dict[str, MSA]
+    interactions: Optional[np.ndarray] = None
     record: Optional[Record] = None
     residue_constraints: Optional[ResidueConstraints] = None
     templates: Optional[dict[str, StructureV2]] = None
