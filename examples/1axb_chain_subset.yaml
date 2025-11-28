@@ -1,0 +1,89 @@
+version: 1
+
+# Configuration for 1axb chain subset with proper sequence extracted from CIF
+# Protein-ligand complex: Chain A + FOS ligand
+
+sequences:
+  - protein:
+      id: A
+      # 263-residue sequence extracted from 1axb_chain_subset.cif
+      # Residues 26-290 from original PDB numbering
+      sequence: HPETLVKVKDAEDQLGARVGYIELDLNSGKILESFRPEERFPMMSTFKVLLCGAVLSRIDAGQEQLGRRIHYSQNDLVEYSPVTEKHLTDGMTVRELCSAAITMSDNTAANLLLTTIGGPKELTAFLHNMGDHVTRLDRWEPELNEAIPNDERDTTMPVAMATTLRKLLTGELLTLASRQQLIDWMEADKVAGPLLRSALPAGWFIADKSGAGERGSRGIIAALGPDGKPSRIVVIYTTGSQATMDERNRQIAEIGASLIKHW
+  
+  - ligand:
+      id: B
+      # FOS (Fosfomycin) - antibacterial agent
+      # Using CCD (Chemical Component Dictionary) code
+      ccd: FOS
+
+# PLIP-derived interaction constraints from 1axb structure
+# These constraints help guide the model to reproduce experimentally observed interactions
+constraints:
+  # Hydrogen bond: ASN 132 to ligand phosphate
+  - interaction:
+      token1: [A, 107]  # ASN residue index in 0-based numbering (132-26+1)
+      token2: [B, 0]    # Ligand residue (single residue)
+      type: hbond
+      distance: 2.14
+      tolerance: 0.25
+      force: true
+  
+  # Hydrogen bond: SER 130 to ligand (strong interaction)
+  - interaction:
+      token1: [A, 105]  # SER residue index
+      token2: [B, 0]
+      type: hbond
+      distance: 1.97
+      tolerance: 0.25
+      force: true  # Enforce this critical H-bond
+  
+  # Hydrogen bond: SER 70 to ligand
+  - interaction:
+      token1: [A, 45]   # SER 70 -> index 45
+      token2: [B, 0]
+      type: hbond
+      distance: 2.06
+      tolerance: 0.25
+      force: true
+  
+  # Hydrogen bond: ASN 170 to ligand (weaker/longer)
+  - interaction:
+      token1: [A, 145]  # ASN 170 -> index 145
+      token2: [B, 0]
+      type: hbond
+      distance: 3.76
+      tolerance: 0.5  # Looser tolerance for longer H-bond
+      force: true
+  
+  # Hydrogen bond: ALA 237 to ligand
+  - interaction:
+      token1: [A, 212]  # ALA 237 -> index 212
+      token2: [B, 0]
+      type: hbond
+      distance: 1.95
+      tolerance: 0.25
+      force: true
+  
+  # Hydrogen bond: ALA 237 backbone (ligand as donor)
+  - interaction:
+      token1: [A, 212]
+      token2: [B, 0]
+      type: hbond
+      distance: 2.09
+      tolerance: 0.25
+      force: true
+  
+  # Hydrophobic contact: GLU 240 to ligand
+  - interaction:
+      token1: [A, 215]  # GLU 240 -> index 215
+      token2: [B, 0]
+      type: hydrophobic
+      distance: 3.39
+      tolerance: 0.6
+      force: true
+
+# Note: Residue indices are 0-based in constraints
+# Original PDB numbering: 26-290 (auth_seq_id)
+# Constraint indices: 0-262 (subtract 26 and use 0-based)
+
+

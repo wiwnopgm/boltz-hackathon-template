@@ -1,0 +1,56 @@
+version: 1
+
+# Example: Using PLIP-based interaction constraints for protein-ligand prediction
+# This demonstrates how to specify specific interaction types between protein and ligand
+
+sequences:
+  - protein:
+      id: A
+      sequence: MVTPEGNVSLVDESLLVGVTDEDRAVRSAHQFYERLIGLWAPAVMEAAHELGVFAALAEAPADSGELARRLDCDARAMRVLLDALYAYDVIDRIHDTNGFRYLLSAEARECLLPGTLFSLVGKFMHDINVAWPAWRNLAEVVRHGARDTSGAESPNGIAQEDYESLVGGINFWAPPIVTTLSRKLRASGRSGDATASVLDVGCGTGLYSQLLLREFPRWTATGLDVERIATLANAQALRLGVEERFATRAGDFWRGGWGTGYDLVLFANIFHLQTPASAVRLMRHAAACLAPDGLVAVVDQIVDADREPKTPQDRFALLFAASMTNTGGGDAYTFQEYEEWFTAAGLQRIETLDTPMHRILLARRATEPSAVPEGQASENLYFQ
+  
+  - ligand:
+      id: B
+      smiles: 'N[C@@H](Cc1ccc(O)cc1)C(=O)O'  # Tyrosine-like ligand
+
+constraints:
+  # NOTE: For SMILES-based ligands, atom names are auto-generated during parsing.
+  # For this example, we use residue-level constraints (token-level).
+  # For specific atom-level constraints, use CCD codes or parse the structure first
+  # to get actual atom names (like N3, O5, C12, etc.)
+  
+  # Hydrogen bond constraint - tight distance control
+  - interaction:
+      token1: [A, 132]  # ASN 132 (protein residue)
+      token2: [A, 132]  # Same residue for demo (replace with actual target)
+      type: hbond
+      distance: 2.8     # Å (optional, defaults to 2.8 for hbond)
+      tolerance: 0.25   # Å (optional, defaults to 0.25 for hbond)
+      force: false      # If true, forces this constraint even during training
+  
+  # Another hydrogen bond
+  - interaction:
+      token1: [A, 130]  # SER 130
+      token2: [A, 130]  # Same residue for demo
+      type: hbond
+      distance: 2.7
+  
+  # Hydrophobic contact - looser distance tolerance
+  - interaction:
+      token1: [A, 240]  # GLU 240
+      token2: [A, 240]  # Same residue for demo
+      type: hydrophobic
+      distance: 3.8     # Å (optional, defaults to 3.8 for hydrophobic)
+      tolerance: 0.6    # Å (optional, defaults to 0.6 for hydrophobic)
+  
+  # Salt bridge constraint
+  - interaction:
+      token1: [A, 170]  # ASN 170  
+      token2: [A, 170]  # Same residue for demo
+      type: salt_bridge
+      distance: 4.0     # Å (optional, defaults to 4.0 for salt_bridge)
+
+# Other supported interaction types:
+# - pi_stacking: aromatic ring stacking (default distance: 4.5 Å, tolerance: 0.4 Å)
+# - pi_cation: cation-pi interaction (default distance: 4.5 Å, tolerance: 0.4 Å)
+# - halogen: halogen bonding (default distance: 3.5 Å, tolerance: 0.3 Å)
+

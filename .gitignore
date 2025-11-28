@@ -166,9 +166,22 @@ hackathon_data/
 
 # Boltz prediction outputs
 #   All result files generated from a boltz prediction call
-boltz_results_*/
+boltz_results/
 my_predictions/
 tmp/
 my_results/
 asos_public_evaluation/
 abag_public_evaluation/
+logs/
+
+results/
+
+annotate_interactions.py
+test_inference.py
+test_plip_integration.py
+boltz_predict_prolif.py
+visualize_diffusion_trajectory.py
+
+submit_test_inference.sbatch
+submit_boltz_prolif.sbatch
+

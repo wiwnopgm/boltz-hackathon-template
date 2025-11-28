@@ -1,3 +1,5 @@
+from collections import defaultdict
+
 ####################################################################################################
 # CHAINS
 ####################################################################################################
@@ -1181,4 +1183,97 @@ ambiguous_atoms = {
     "KR": "KR",
     "BRBJ": "BR",
     "UNK": "*",
+}
+
+####################################################################################################
+# features
+####################################################################################################
+token_features = [
+    "token_index",
+    "residue_index",
+    "asym_id",
+    "entity_id",
+    "sym_id",
+    "mol_type",
+    "res_type",
+    "res_type_clone",
+    "is_standard",
+    "design_mask",
+    "binding_type",
+    "structure_group",
+    "token_bonds",
+    "type_bonds",
+    "token_pad_mask",
+    "token_resolved_mask",
+    "token_disto_mask",
+    "token_pair_mask",
+    "contact_conditioning",
+    "contact_threshold",
+    "method_feature",
+    "temp_feature",
+    "ph_feature",
+    "modified",
+    "ccd",
+    "cyclic",
+    "center_coords",
+    "token_distance_mask",
+    "target_msa_mask",
+    "design_ss_mask",
+    "feature_residue_index",
+    "feature_asym_id",
+    "ligand_affinity_mask",
+    "token_to_res",
+    "ss_type",
+]
+
+atom_features = [
+    "ref_pos",
+    "atom_resolved_mask",
+    "ref_atom_name_chars",
+    "ref_element",
+    "ref_charge",
+    "ref_chirality",
+    "atom_backbone_feat",
+    "ref_space_uid",
+    "coords",
+    "atom_pad_mask",
+    "atom_to_token",
+    "new_to_old_atomidx",
+    "bfactor",
+    "plddt",
+    "masked_ref_atom_name_chars",
+    "backbone_mask",
+    "fake_atom_mask",
+]
+
+# Formal charges (because CCD ones are missing negative charges???)
+formal_charges = {k: defaultdict(int) for k in prot_token_to_letter.keys()}
+formal_charges["ASP"]["OD2"] = -1
+formal_charges["GLU"]["OE2"] = -1
+formal_charges["LYS"]["NZ"] = 1
+formal_charges["ARG"]["NH2"] = 1
+# Note: Histidine is protonated in CCD, but usually isn't at neutral pH
+
+
+####################################################################################################
+# INTERACTIONS
+####################################################################################################
+interaction_distance_cutoffs = {
+    'close_contact': 4.0,      # VdW contact distance
+    'hydrophobic': 5.0,        # Hydrophobic interaction limit
+    'hbond_max': 3.7,          # H-bond maximum distance
+    'hbond_min': 2.5,          # H-bond minimum distance
+    'pistacking_max': 5.5,     # Pi-stacking maximum
+    'pistacking_min': 3.5,     # Pi-stacking minimum
+    'ionic': 5.0,              # Ionic interaction limit
+}
+
+interaction_types = {
+    'close_contact': 'close_contact',
+    'hydrophobic': 'hydrophobic',
+    'hbond_max': 'hbond_max',
+    'hbond_min': 'hbond_min',
+    'pistacking_max': 'pistacking_max',
+    'pistacking_min': 'pistacking_min',
+    'ionic': 'ionic',
 }

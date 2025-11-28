@@ -1,0 +1,17 @@
+version: 1
+
+# Configuration for 1axb chain subset with proper sequence extracted from CIF
+# Protein-ligand complex: Chain A + FOS ligand
+
+sequences:
+  - protein:
+      id: A
+      # 263-residue sequence extracted from 1axb_chain_subset.cif
+      # Residues 26-290 from original PDB numbering
+      sequence: HPETLVKVKDAEDQLGARVGYIELDLNSGKILESFRPEERFPMMSTFKVLLCGAVLSRIDAGQEQLGRRIHYSQNDLVEYSPVTEKHLTDGMTVRELCSAAITMSDNTAANLLLTTIGGPKELTAFLHNMGDHVTRLDRWEPELNEAIPNDERDTTMPVAMATTLRKLLTGELLTLASRQQLIDWMEADKVAGPLLRSALPAGWFIADKSGAGERGSRGIIAALGPDGKPSRIVVIYTTGSQATMDERNRQIAEIGASLIKHW
+  
+  - ligand:
+      id: B
+      # FOS (Fosfomycin) - antibacterial agent
+      # Using CCD (Chemical Component Dictionary) code
+      ccd: FOS

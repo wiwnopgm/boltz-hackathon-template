@@ -64,6 +64,7 @@ def load_input(
             target_dir / record.id / f"pre_affinity_{record.id}.npz"
         )
     else:
+        print("Loading structure", target_dir / f"{record.id}.npz")
         structure = StructureV2.load(target_dir / f"{record.id}.npz")
 
     msas = {}
@@ -261,13 +262,19 @@ class PredictionDataset(torch.utils.data.Dataset):
         # Inference specific options
         options = record.inference_options
         if options is None:
-            pocket_constraints, contact_constraints, negative_pocket_constraints = None, None, None
+            pocket_constraints, contact_constraints, negative_pocket_constraints, interaction_constraints = None, None, None, None
         else:
-            pocket_constraints, contact_constraints, negative_pocket_constraints = (
+            pocket_constraints, contact_constraints, negative_pocket_constraints, interaction_constraints = (
                 options.pocket_constraints,
                 options.contact_constraints,
                 options.negative_pocket_constraints,
+                options.interaction_constraints,
             )
+
+        print("pocket_constraints", pocket_constraints)
+        print("contact_constraints", contact_constraints)
+        print("negative_pocket_constraints", negative_pocket_constraints)
+        print("interaction_constraints", interaction_constraints)
 
         # Get random seed
         seed = 42
@@ -289,6 +296,7 @@ class PredictionDataset(torch.utils.data.Dataset):
                 inference_pocket_constraints=pocket_constraints,
                 inference_contact_constraints=contact_constraints,
                 inference_negative_pocket_constraints=negative_pocket_constraints,
+                inference_interaction_constraints=interaction_constraints,
                 compute_constraint_features=True,
                 override_method=self.override_method,
                 compute_affinity=self.affinity,

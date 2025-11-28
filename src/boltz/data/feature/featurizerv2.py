@@ -2223,6 +2223,147 @@ def process_repulsion_contact_feature_constraints(
     }
 
 
+def process_interaction_feature_constraints(
+    data: Tokenized,
+    inference_interaction_constraints: list[tuple[tuple[int, int], tuple[int, int], str, float, float, bool]],
+):
+    """Process PLIP interaction constraints to create interaction features.
+    
+    Args:
+        data: Tokenized data
+        inference_interaction_constraints: List of (token1, token2, interaction_type, target_distance, tolerance, force) tuples
+        
+    Returns:
+        Dictionary with PLIP interaction features for different interaction types
+    """
+    token_data = data.tokens
+    
+    # Interaction type mapping
+    interaction_type_map = {
+        "hbond": 0,
+        "hydrophobic": 1,
+        "salt_bridge": 2,
+        "pi_stacking": 3,
+        "pi_cation": 4,
+        "halogen": 5,
+    }
+    
+    # Separate lists for different interaction types
+    hbond_donor_idx, hbond_acceptor_idx, hbond_distances, hbond_strengths = [], [], [], []
+    hydrophobic_ligand_idx, hydrophobic_protein_idx, hydrophobic_distances = [], [], []
+    
+    # General interaction lists
+    all_pair_indices, all_types, all_distances, all_strengths, all_tolerances = [], [], [], [], []
+    
+    for token1, token2, interaction_type, target_distance, tolerance, force in inference_interaction_constraints:
+        # Find atom indices for token1
+        atom_idx1_list = []
+        for idx1, _token1 in enumerate(token_data):
+            if (
+                _token1["mol_type"] != const.chain_type_ids["NONPOLYMER"]
+                and (_token1["asym_id"], _token1["res_idx"]) == token1
+            ) or (
+                _token1["mol_type"] == const.chain_type_ids["NONPOLYMER"]
+                and (_token1["asym_id"], _token1["atom_idx"]) == token1
+            ):
+                # Get all atoms for this token
+                atom_start = _token1["atom_idx"]
+                atom_end = atom_start + _token1["atom_num"]
+                atom_idx1_list = list(range(atom_start, atom_end))
+                break
+        
+        # Find atom indices for token2
+        atom_idx2_list = []
+        for idx2, _token2 in enumerate(token_data):
+            if (
+                _token2["mol_type"] != const.chain_type_ids["NONPOLYMER"]
+                and (_token2["asym_id"], _token2["res_idx"]) == token2
+            ) or (
+                _token2["mol_type"] == const.chain_type_ids["NONPOLYMER"]
+                and (_token2["asym_id"], _token2["atom_idx"]) == token2
+            ):
+                # Get all atoms for this token
+                atom_start = _token2["atom_idx"]
+                atom_end = atom_start + _token2["atom_num"]
+                atom_idx2_list = list(range(atom_start, atom_end))
+                break
+        
+        if not atom_idx1_list or not atom_idx2_list:
+            continue
+        
+        # For simplicity, use representative atoms (first atom in each residue/ligand)
+        # In a full implementation, you might want to use specific atoms based on interaction type
+        atom1 = atom_idx1_list[0]
+        atom2 = atom_idx2_list[0]
+        
+        # Add to type-specific lists
+        interaction_type_lower = interaction_type.lower()
+        
+        if interaction_type_lower == "hbond":
+            hbond_donor_idx.append(atom1)
+            hbond_acceptor_idx.append(atom2)
+            hbond_distances.append(target_distance)
+            # Strength based on force flag and tolerance (tighter = stronger)
+            strength = 1.5 if force else (1.0 if tolerance < 0.3 else 0.5)
+            hbond_strengths.append(strength)
+        
+        elif interaction_type_lower == "hydrophobic":
+            hydrophobic_ligand_idx.append(atom1)
+            hydrophobic_protein_idx.append(atom2)
+            hydrophobic_distances.append(target_distance)
+        
+        # Add to general interaction lists
+        all_pair_indices.append([atom1, atom2])
+        all_types.append(interaction_type_map.get(interaction_type_lower, 0))
+        all_distances.append(target_distance)
+        # Strength based on force and tolerance
+        strength = 1.5 if force else (1.0 if tolerance < 0.4 else 0.5)
+        all_strengths.append(strength)
+        all_tolerances.append(tolerance)
+    
+    # Convert to tensors
+    features = {}
+    
+    # H-bond features
+    if hbond_donor_idx:
+        features["plip_hbond_donor_idx"] = torch.tensor(hbond_donor_idx, dtype=torch.long).unsqueeze(0)
+        features["plip_hbond_acceptor_idx"] = torch.tensor(hbond_acceptor_idx, dtype=torch.long).unsqueeze(0)
+        features["plip_hbond_distance"] = torch.tensor(hbond_distances, dtype=torch.float32).unsqueeze(0)
+        features["plip_hbond_strength"] = torch.tensor(hbond_strengths, dtype=torch.float32).unsqueeze(0)
+    else:
+        features["plip_hbond_donor_idx"] = torch.empty((1, 0), dtype=torch.long)
+        features["plip_hbond_acceptor_idx"] = torch.empty((1, 0), dtype=torch.long)
+        features["plip_hbond_distance"] = torch.empty((1, 0), dtype=torch.float32)
+        features["plip_hbond_strength"] = torch.empty((1, 0), dtype=torch.float32)
+    
+    # Hydrophobic features
+    if hydrophobic_ligand_idx:
+        features["plip_hydrophobic_ligand_idx"] = torch.tensor(hydrophobic_ligand_idx, dtype=torch.long).unsqueeze(0)
+        features["plip_hydrophobic_protein_idx"] = torch.tensor(hydrophobic_protein_idx, dtype=torch.long).unsqueeze(0)
+        features["plip_hydrophobic_distance"] = torch.tensor(hydrophobic_distances, dtype=torch.float32).unsqueeze(0)
+    else:
+        features["plip_hydrophobic_ligand_idx"] = torch.empty((1, 0), dtype=torch.long)
+        features["plip_hydrophobic_protein_idx"] = torch.empty((1, 0), dtype=torch.long)
+        features["plip_hydrophobic_distance"] = torch.empty((1, 0), dtype=torch.float32)
+    
+    # General interaction features
+    if all_pair_indices:
+        pair_tensor = torch.tensor(all_pair_indices, dtype=torch.long).T  # [2, N]
+        features["plip_interaction_index"] = pair_tensor.unsqueeze(0)
+        features["plip_interaction_type"] = torch.tensor(all_types, dtype=torch.long).unsqueeze(0)
+        features["plip_target_distance"] = torch.tensor(all_distances, dtype=torch.float32).unsqueeze(0)
+        features["plip_interaction_strength"] = torch.tensor(all_strengths, dtype=torch.float32).unsqueeze(0)
+        features["plip_interaction_mask"] = torch.ones(len(all_types), dtype=torch.bool).unsqueeze(0)
+    else:
+        features["plip_interaction_index"] = torch.empty((1, 2, 0), dtype=torch.long)
+        features["plip_interaction_type"] = torch.empty((1, 0), dtype=torch.long)
+        features["plip_target_distance"] = torch.empty((1, 0), dtype=torch.float32)
+        features["plip_interaction_strength"] = torch.empty((1, 0), dtype=torch.float32)
+        features["plip_interaction_mask"] = torch.empty((1, 0), dtype=torch.bool)
+    
+    return features
+
+
 class Boltz2Featurizer:
     """Boltz2 featurizer."""
 
@@ -2268,6 +2409,9 @@ class Boltz2Featurizer:
         ] = None,
         inference_negative_pocket_constraints: Optional[
             list[tuple[int, list[tuple[int, int]], float]]
+        ] = None,
+        inference_interaction_constraints: Optional[
+            list[tuple[tuple[int, int], tuple[int, int], str, float, float, bool]]
         ] = None,
         compute_affinity: bool = False,
     ) -> dict[str, Tensor]:
@@ -2400,6 +2544,7 @@ class Boltz2Featurizer:
         chain_constraint_features = {}
         contact_constraint_features = {}
         repulsion_contact_constraint_features = {}
+        interaction_constraint_features = {}
         if compute_constraint_features:
             residue_constraint_features = process_residue_constraint_features(data)
             chain_constraint_features = process_chain_feature_constraints(data)
@@ -2411,6 +2556,10 @@ class Boltz2Featurizer:
             repulsion_contact_constraint_features = process_repulsion_contact_feature_constraints(
                 data=data,
                 inference_negative_pocket_constraints=inference_negative_pocket_constraints if inference_negative_pocket_constraints else [],
+            )
+            interaction_constraint_features = process_interaction_feature_constraints(
+                data=data,
+                inference_interaction_constraints=inference_interaction_constraints if inference_interaction_constraints else [],
             )
 
         return {
@@ -2425,5 +2574,6 @@ class Boltz2Featurizer:
             **chain_constraint_features,
             **contact_constraint_features,
             **repulsion_contact_constraint_features,
+            **interaction_constraint_features,
             **ligand_to_mw,
         }

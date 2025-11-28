@@ -930,9 +930,20 @@ def token_spec_to_ids(
     chain_name, residue_index_or_atom_name, chain_to_idx, atom_idx_map, chains
 ):
     if chains[chain_name].type == const.chain_type_ids["NONPOLYMER"]:
-        # Non-polymer chains are indexed by atom name
-        _, _, atom_idx = atom_idx_map[(chain_name, 0, residue_index_or_atom_name)]
-        return (chain_to_idx[chain_name], atom_idx)
+        # Non-polymer chains can be indexed by atom name (string) or residue index (int)
+        if isinstance(residue_index_or_atom_name, int):
+            # Residue-level constraint for ligand - use first atom of the residue
+            # Find the first atom for this chain and residue
+            for (ch, res_idx, atom_name), (asym_id, res_id, atom_idx) in atom_idx_map.items():
+                if ch == chain_name and res_idx == residue_index_or_atom_name:
+                    return (chain_to_idx[chain_name], atom_idx)
+            # If not found, raise error
+            msg = f"Could not find residue {residue_index_or_atom_name} in chain {chain_name}"
+            raise KeyError(msg)
+        else:
+            # Atom-level constraint - use specific atom name
+            _, _, atom_idx = atom_idx_map[(chain_name, 0, residue_index_or_atom_name)]
+            return (chain_to_idx[chain_name], atom_idx)
     else:
         # Polymer chains are indexed by residue index
         return chain_to_idx[chain_name], residue_index_or_atom_name - 1
@@ -1513,6 +1524,7 @@ def parse_boltz_schema(  # noqa: C901, PLR0915, PLR0912
     pocket_constraints = []
     contact_constraints = []
     negative_pocket_constraints = []
+    interaction_constraints = []
     constraints = schema.get("constraints", [])
     for constraint in constraints:
         if "bond" in constraint:
@@ -1625,6 +1637,67 @@ def parse_boltz_schema(  # noqa: C901, PLR0915, PLR0912
             force = constraint["contact"].get("force", False)
 
             contact_constraints.append((token1, token2, max_distance, force))
+        elif "interaction" in constraint:
+            if (
+                "token1" not in constraint["interaction"]
+                or "token2" not in constraint["interaction"]
+                or "type" not in constraint["interaction"]
+            ):
+                msg = f"Interaction constraint was not properly specified (need token1, token2, type)"
+                raise ValueError(msg)
+
+            if not boltz_2:
+                msg = f"Interaction constraint is not supported in Boltz-1!"
+                raise ValueError(msg)
+
+            # Parse interaction type
+            interaction_type = constraint["interaction"]["type"].lower()
+            valid_types = {"hbond", "hydrophobic", "salt_bridge", "pi_stacking", "pi_cation", "halogen"}
+            if interaction_type not in valid_types:
+                msg = f"Invalid interaction type: {interaction_type}. Must be one of {valid_types}"
+                raise ValueError(msg)
+
+            # Parse distance and tolerance (with defaults based on interaction type)
+            default_distances = {
+                "hbond": 2.8,
+                "hydrophobic": 3.8,
+                "salt_bridge": 4.0,
+                "pi_stacking": 4.5,
+                "pi_cation": 4.5,
+                "halogen": 3.5
+            }
+            default_tolerances = {
+                "hbond": 0.25,
+                "hydrophobic": 0.6,
+                "salt_bridge": 0.4,
+                "pi_stacking": 0.4,
+                "pi_cation": 0.4,
+                "halogen": 0.3
+            }
+
+            target_distance = constraint["interaction"].get("distance", default_distances[interaction_type])
+            tolerance = constraint["interaction"].get("tolerance", default_tolerances[interaction_type])
+
+            # Parse tokens
+            chain_name1, residue_index_or_atom_name1 = constraint["interaction"]["token1"]
+            token1 = token_spec_to_ids(
+                chain_name1,
+                residue_index_or_atom_name1,
+                chain_to_idx,
+                atom_idx_map,
+                chains,
+            )
+            chain_name2, residue_index_or_atom_name2 = constraint["interaction"]["token2"]
+            token2 = token_spec_to_ids(
+                chain_name2,
+                residue_index_or_atom_name2,
+                chain_to_idx,
+                atom_idx_map,
+                chains,
+            )
+            force = constraint["interaction"].get("force", False)
+
+            interaction_constraints.append((token1, token2, interaction_type, target_distance, tolerance, force))
         else:
             msg = f"Invalid constraint: {constraint}"
             raise ValueError(msg)
@@ -1840,6 +1913,7 @@ def parse_boltz_schema(  # noqa: C901, PLR0915, PLR0912
         pocket_constraints=pocket_constraints,
         contact_constraints=contact_constraints,
         negative_pocket_constraints=negative_pocket_constraints,
+        interaction_constraints=interaction_constraints,
     )
     record = Record(
         id=name,

@@ -37,6 +37,12 @@ class NumpySerializable:
             The loaded object.
 
         """
+        print(f"DEBUG NumpySerializable.load:")
+        print(f"  cls: {cls}")
+        print(f"  path: {path}")
+        print(f"  path type: {type(path)}")
+        print(f"  path exists: {path.exists() if hasattr(path, 'exists') else 'N/A'}")
+        print(f"  path suffix: {path.suffix if hasattr(path, 'suffix') else 'N/A'}")
         return cls(**np.load(path, allow_pickle=True))
 
     def dump(self, path: Path) -> None:

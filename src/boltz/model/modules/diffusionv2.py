@@ -34,6 +34,15 @@ from boltz.model.modules.utils import (
 )
 from boltz.model.potentials.potentials import get_potentials
 
+# Optional support for interaction tracking during diffusion
+# Note: We use simple distance-based geometric approximation
+# Independent of plif_validity or external constants
+try:
+    import prolif as plf
+    PROLIF_AVAILABLE = True
+except ImportError:
+    PROLIF_AVAILABLE = False
+
 
 class DiffusionModule(Module):
     """Diffusion module"""
@@ -231,6 +240,23 @@ class AtomDiffusion(Module):
 
         self.token_s = score_model_args["token_s"]
         self.register_buffer("zero", torch.tensor(0.0), persistent=False)
+        
+        # Interaction tracking (optional)
+        # Uses distance-based approximation during diffusion
+        self.enable_prolif_tracking = False
+        self.prolif_interactions = []
+        
+        # Distance cutoffs for interaction classification (in Angstroms)
+        # Based on standard structural biology literature
+        self.interaction_cutoffs = {
+            'close_contact': 4.0,      # VdW contact distance
+            'hydrophobic': 5.0,        # Hydrophobic interaction limit
+            'hbond_max': 3.7,          # H-bond maximum distance
+            'hbond_min': 2.5,          # H-bond minimum distance
+            'pistacking_max': 5.5,     # Pi-stacking maximum
+            'pistacking_min': 3.5,     # Pi-stacking minimum
+            'ionic': 5.0,              # Ionic interaction limit
+        }
 
     @property
     def device(self):
@@ -526,6 +552,29 @@ class AtomDiffusion(Module):
             )
 
             atom_coords = atom_coords_next
+            
+            # Compute ProLIF interactions if enabled (every 25 steps)
+            if (
+                self.enable_prolif_tracking 
+                and not self.training
+                and PROLIF_AVAILABLE
+            ):
+                # Track every 25 steps, plus first and last step
+                should_track = (
+                    step_idx == 0 or  # First step
+                    step_idx == num_sampling_steps - 1 or  # Last step
+                    step_idx % 25 == 0  # Every 25 steps
+                )
+                
+                if should_track:
+                    progress_pct = int(100 * step_idx / max(num_sampling_steps - 1, 1))
+                    print(f"\n[Diffusion {progress_pct}%] Computing interactions at step {step_idx}/{num_sampling_steps-1}")
+                    self._annotate_interactions(
+                        atom_coords_denoised,
+                        network_condition_kwargs['feats'],
+                        step_idx,
+                        f"diffusion_step_{step_idx}"
+                    )
 
         return dict(sample_atom_coords=atom_coords, diff_token_repr=token_repr)
 
@@ -691,3 +740,302 @@ class AtomDiffusion(Module):
             }
 
         return {"loss": total_loss, "loss_breakdown": loss_breakdown}
+    
+    def _annotate_interactions(
+        self,
+        coords: torch.Tensor,
+        feats: dict,
+        step_idx: int,
+        label: str = "step"
+    ):
+        """
+        Compute protein-ligand interactions from coordinates during diffusion.
+        Uses fast distance-based approximation with configurable cutoffs.
+        
+        Note: This is NOT full ProLIF analysis - it's a fast geometric approximation
+        suitable for tracking interaction convergence during diffusion.
+        
+        Args:
+            coords: Atom coordinates tensor [batch, n_atoms, 3]
+            feats: Feature dictionary from model
+            step_idx: Current step index
+            label: Label for this computation
+        """
+        if not PROLIF_AVAILABLE:
+            return
+        
+        try:
+            import time
+            start_time = time.time()
+            # Convert to numpy and take first sample if batched
+            coords_np = coords.detach().cpu().numpy()
+            if len(coords_np.shape) == 3:
+                coords_np = coords_np[0]
+            
+            # Extract protein and ligand masks from features
+            protein_mask, ligand_mask = self._extract_protein_ligand_masks(feats)
+            
+            if protein_mask is None or ligand_mask is None:
+                return
+            
+            protein_coords = coords_np[protein_mask]
+            ligand_coords = coords_np[ligand_mask]
+            
+            if len(protein_coords) == 0 or len(ligand_coords) == 0:
+                return
+                        
+            # 1. Filter to tight pocket (6Å instead of 10Å)
+            ligand_center = ligand_coords.mean(axis=0)
+            distances = np.linalg.norm(protein_coords - ligand_center, axis=1)
+            pocket_mask = distances < 6.0  # Tight pocket for speed
+            protein_coords_pocket = protein_coords[pocket_mask]
+            
+            if len(protein_coords_pocket) == 0:
+                print(f"  [{label}]: No protein atoms near ligand, skipping")
+                return
+            
+            # 2. Limit to 50 closest atoms maximum (very aggressive)
+            if len(protein_coords_pocket) > 50:
+                pocket_distances = distances[pocket_mask]
+                closest_indices = np.argsort(pocket_distances)[:50]
+                protein_coords_pocket = protein_coords_pocket[closest_indices]
+            
+            # 3. Limit ligand atoms if too many
+            if len(ligand_coords) > 50:
+                ligand_coords = ligand_coords[:50]
+            
+            print(f"  [{label}]: Processing {len(protein_coords_pocket)} protein atoms, "
+                  f"{len(ligand_coords)} ligand atoms")
+            
+            # Use fast distance-based interaction detection
+            # ProLIF requires full atom typing and hydrogens which we don't have during diffusion
+            # Distance-based approach is fast and suitable for tracking convergence
+            from collections import defaultdict
+            interaction_counts = defaultdict(int)
+            interacting_residues = set()
+            
+            # Compute pairwise distances
+            prot_expanded = protein_coords_pocket[:, np.newaxis, :]  # (n_prot, 1, 3)
+            lig_expanded = ligand_coords[np.newaxis, :, :]  # (1, n_lig, 3)
+            distances = np.linalg.norm(prot_expanded - lig_expanded, axis=2)
+            
+            # For each protein atom, find closest ligand atom
+            min_distances = distances.min(axis=1)  # (n_prot,)
+            
+            # Classify interactions by distance using configurable cutoffs
+            cutoffs = self.interaction_cutoffs
+            
+            for i, min_dist in enumerate(min_distances):
+                res_id = f"RES{i+1}"
+                
+                # Close contact (VdW)
+                if min_dist < cutoffs['close_contact']:
+                    interaction_counts['CloseContact'] += 1
+                    interacting_residues.add(res_id)
+                
+                # Hydrophobic interactions
+                if cutoffs['close_contact'] <= min_dist < cutoffs['hydrophobic']:
+                    interaction_counts['Hydrophobic'] += 1
+                    interacting_residues.add(res_id)
+                
+                # H-bond potential (without atom typing, approximate based on distance)
+                if cutoffs['hbond_min'] <= min_dist <= cutoffs['hbond_max']:
+                    interaction_counts['HBond'] += 1
+                    interacting_residues.add(res_id)
+                
+                # Pi-stacking potential (aromatic rings)
+                if cutoffs['pistacking_min'] <= min_dist <= cutoffs['pistacking_max']:
+                    interaction_counts['PiStack'] += 1
+                    interacting_residues.add(res_id)
+                
+                # Ionic interactions (charged residues)
+                if min_dist < cutoffs['ionic']:
+                    interaction_counts['Ionic'] += 1
+                    interacting_residues.add(res_id)
+            
+            # Store results including coordinates
+            result = {
+                'label': label,
+                'step_idx': step_idx,
+                'total_interactions': sum(interaction_counts.values()),
+                'n_interacting_residues': len(interacting_residues),
+                'interaction_counts': dict(interaction_counts),
+                'interacting_residues': sorted(list(interacting_residues)),
+                'coordinates': {
+                    'protein_pocket': protein_coords_pocket.tolist(),
+                    'ligand': ligand_coords.tolist(),
+                },
+                'n_protein_atoms': len(protein_coords_pocket),
+                'n_ligand_atoms': len(ligand_coords),
+            }
+            
+            self.prolif_interactions.append(result)
+            
+            elapsed = time.time() - start_time
+            # Print summary with coordinate info
+            print(f"  [{label}]: {result['total_interactions']} interactions, "
+                  f"{result['n_interacting_residues']} residues, "
+                  f"coords saved: {len(protein_coords_pocket)}+{len(ligand_coords)} atoms ({elapsed:.2f}s)")
+            
+        except Exception as e:
+            print(f"  [{label}]: ProLIF failed: {str(e)[:100]}")
+    
+    def _extract_protein_ligand_masks(self, feats: dict):
+        """
+        Extract protein and ligand atom masks from feature dictionary.
+        
+        Args:
+            feats: Feature dictionary
+            
+        Returns:
+            Tuple of (protein_mask, ligand_mask) as numpy arrays
+        """
+        try:
+            # Get molecule types
+            if 'mol_type' not in feats or 'atom_to_token' not in feats:
+                return None, None
+            
+            mol_type = feats['mol_type']
+            atom_to_token = feats['atom_to_token']
+            
+            # Convert to numpy
+            if torch.is_tensor(mol_type):
+                mol_type = mol_type.cpu().numpy()
+            if torch.is_tensor(atom_to_token):
+                atom_to_token = atom_to_token.cpu().numpy()
+            
+            # Handle batch dimension
+            if len(mol_type.shape) > 1:
+                mol_type = mol_type[0]
+            if len(atom_to_token.shape) == 3:
+                atom_to_token = atom_to_token[0]
+            
+            # Map each atom to its molecule type
+            # atom_to_token: [n_atoms, n_tokens]
+            # mol_type: [n_tokens]
+            atom_mol_types = atom_to_token @ mol_type.reshape(-1, 1)
+            atom_mol_types = atom_mol_types.flatten()
+            
+            # Chain type IDs: 0=protein, 1=RNA, 2=DNA, 3=NONPOLYMER
+            protein_mask = atom_mol_types <= 2  # protein/RNA/DNA
+            ligand_mask = atom_mol_types == 3   # NONPOLYMER (ligand)
+            
+            return protein_mask, ligand_mask
+            
+        except Exception as e:
+            print(f"  Error extracting masks: {e}")
+            return None, None
+    
+    def reset_prolif_tracking(self):
+        """Reset ProLIF tracking data."""
+        self.prolif_interactions = []
+    
+    @property
+    def prolif_interaction_types(self):
+        """Get list of tracked interaction types (for compatibility)."""
+        return ['CloseContact', 'Hydrophobic', 'HBond', 'PiStack', 'Ionic']
+    
+    def get_prolif_summary(self):
+        """
+        Get summary of tracked interactions across all diffusion steps.
+        
+        Returns:
+            Dictionary with summary statistics including:
+            - n_steps: Number of tracked steps
+            - interactions: List of interaction data per step
+            - convergence: Metrics showing how interactions change
+            - stability: First step where interactions stabilize
+        """
+        if not self.prolif_interactions:
+            return {'n_steps': 0, 'interactions': []}
+        
+        summary = {
+            'n_steps': len(self.prolif_interactions),
+            'interactions': self.prolif_interactions,
+        }
+        
+        # Compute convergence if we have multiple steps
+        if len(self.prolif_interactions) >= 2:
+            first = self.prolif_interactions[0]
+            last = self.prolif_interactions[-1]
+            
+            first_residues = set(first.get('interacting_residues', []))
+            last_residues = set(last.get('interacting_residues', []))
+            
+            summary['convergence'] = {
+                'initial_interactions': first.get('total_interactions', 0),
+                'final_interactions': last.get('total_interactions', 0),
+                'change': last.get('total_interactions', 0) - first.get('total_interactions', 0),
+                'persistent_residues': len(first_residues & last_residues),
+                'gained_residues': len(last_residues - first_residues),
+                'lost_residues': len(first_residues - last_residues),
+            }
+        
+        # Detect stability: find first step where interactions don't change for 10 consecutive steps
+        stability = self._detect_interaction_stability(window_size=3)
+        if stability:
+            summary['stability'] = stability
+        
+        return summary
+    
+    def _detect_interaction_stability(self, window_size=10):
+        """
+        Detect the first step where key interactions remain stable for a given window.
+        Only checks HBond and PiStack as these are the most specific interactions.
+        
+        Args:
+            window_size: Number of consecutive steps that must be unchanged
+            
+        Returns:
+            Dictionary with stability information or None if not stable
+        """
+        if len(self.prolif_interactions) < window_size + 1:
+            return None
+        
+        # Key interaction types to check for stability
+        key_interactions = ['HBond', 'PiStack']
+        
+        # Check each potential starting point
+        for i in range(len(self.prolif_interactions) - window_size):
+            # Get key interaction counts at step i
+            reference = self.prolif_interactions[i]
+            ref_counts = reference.get('interaction_counts', {})
+            ref_key_counts = {k: ref_counts.get(k, 0) for k in key_interactions}
+            
+            # Check if next window_size steps have same key interactions
+            is_stable = True
+            for j in range(1, window_size + 1):
+                current = self.prolif_interactions[i + j]
+                curr_counts = current.get('interaction_counts', {})
+                curr_key_counts = {k: curr_counts.get(k, 0) for k in key_interactions}
+                
+                # Check if key interaction counts match
+                if ref_key_counts != curr_key_counts:
+                    is_stable = False
+                    break
+            
+            if is_stable:
+                # Found first stable point
+                first_stable_step = self.prolif_interactions[i]
+                last_checked_step = self.prolif_interactions[i + window_size]
+                
+                # Get full interaction counts for reporting
+                all_counts = first_stable_step.get('interaction_counts', {})
+                
+                return {
+                    'first_stable_step': first_stable_step['step_idx'],
+                    'stable_from_label': first_stable_step['label'],
+                    'last_checked_step': last_checked_step['step_idx'],
+                    'window_size': window_size,
+                    'stable_interaction_counts': dict(all_counts),
+                    'key_stable_counts': ref_key_counts,  # Only HBond and PiStack
+                    'stable_residues': sorted(list(first_stable_step.get('interacting_residues', []))),
+                    'n_stable_interactions': sum(all_counts.values()),
+                    'n_key_interactions': sum(ref_key_counts.values()),
+                    'n_stable_residues': first_stable_step.get('n_interacting_residues', 0),
+                    'checked_types': key_interactions,
+                    'message': f'Key interactions (HBond, PiStack) stabilized at step {first_stable_step["step_idx"]} '
+                              f'and remained unchanged for {window_size} consecutive steps'
+                }
+        
+        return None
